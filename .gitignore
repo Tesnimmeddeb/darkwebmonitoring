@@ -1,0 +1,7 @@
+.env
+
+#les tests
+test_otx.py
+test_ransomware.py
+test_crtsh.py
+test_phishtank.py

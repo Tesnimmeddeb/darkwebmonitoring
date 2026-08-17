@@ -1,0 +1,39 @@
+{
+  "general_platform_name": "AEGIS  MONITOR",
+  "general_timezone": "UTC",
+  "general_language": "fr",
+  "general_logo_filename": "screen.png",
+  "security_mfa": true,
+  "security_session_timeout": "30",
+  "security_ip_whitelist": "",
+  "security_pwd_min_length": true,
+  "security_pwd_upper_lower": true,
+  "security_pwd_special": true,
+  "monitoring_scan_interval": "5",
+  "monitoring_src_hudsonrock": true,
+  "monitoring_src_ransomwarelive": true,
+  "monitoring_src_checkthesum": true,
+  "monitoring_src_crtsh": true,
+  "monitoring_alert_threshold": "eleve",
+  "notif_email_enabled": true,
+  "notif_slack_enabled": false,
+  "notif_pagerduty_enabled": false,
+  "notif_email_recipients": "tesmeddeb@gmail.com",
+  "notif_digest_enabled": false,
+  "team_members": [
+    {
+      "email": "soc_lead@company.com",
+      "role": "Admin"
+    },
+    {
+      "email": "analyst_1@company.com",
+      "role": "Analyst"
+    },
+    {
+      "email": "tesmeddeb@gmail.com",
+      "role": "Analyst"
+    }
+  ],
+  "monitoring_src_otx": true,
+  "billing_plan": "PRO"
+}
