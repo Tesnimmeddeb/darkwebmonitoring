@@ -1,5 +1,5 @@
 {
-  "general_platform_name": "AEGIS  MONITOR",
+  "general_platform_name": "AEGIS MONITOR",
   "general_timezone": "UTC",
   "general_language": "fr",
   "general_logo_filename": "screen.png",
@@ -13,7 +13,11 @@
   "monitoring_src_hudsonrock": true,
   "monitoring_src_ransomwarelive": true,
   "monitoring_src_checkthesum": true,
-  "monitoring_src_crtsh": true,
+  "monitoring_src_ransomlook": true,
+  "monitoring_tunisia_watch": true,
+  "monitoring_apt_watch": true,
+  "monitoring_deepdarkcti": true,
+  "monitoring_wazuh_export": true,
   "monitoring_alert_threshold": "eleve",
   "notif_email_enabled": true,
   "notif_slack_enabled": false,
@@ -34,6 +38,45 @@
       "role": "Analyst"
     }
   ],
+  "monitoring_src_chiasmodon": true,
+  "monitoring_src_leakcheck": true,
+  "monitoring_src_crtsh": true,
   "monitoring_src_otx": true,
-  "billing_plan": "PRO"
+  "billing_plan": "PRO",
+  "monitoring_assets": [
+    {
+      "identifier": "monoprix.tn",
+      "type": "Domaine",
+      "date_ajout": "2026-08-26T15:40:18"
+    },
+    {
+      "identifier": "entreprise.tn",
+      "type": "Domaine",
+      "date_ajout": "2026-08-26T15:40:18"
+    },
+    {
+      "identifier": "WATCH_TN",
+      "type": "Mot-clé",
+      "date_ajout": "2026-08-26T15:40:18"
+    },
+    {
+      "identifier": "yueki",
+      "type": "Mot-clé",
+      "date_ajout": "2026-08-26T15:40:18"
+    },
+    {
+      "identifier": "manvirdi2000@gmail.com",
+      "type": "Email",
+      "date_ajout": "2026-08-26T15:40:18"
+    },
+    {
+      "identifier": "tunise.tn",
+      "type": "Domaine",
+      "date_ajout": "2026-08-26T15:40:18"
+    }
+  ],
+  "monitored_domains": [
+    "delice.tn",
+    "orange.tn"
+  ]
 }

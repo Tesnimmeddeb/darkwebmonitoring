@@ -1,7 +1,8 @@
+
 """
 AEGIS MONITOR — Dark Web CTI Dashboard
 Fichier unique : navigation (sidebar) + pages (design Stitch "Obsidian Sentinel")
-branchées sur les vraies données (storage.lire_toutes_les_alertes).
+branchées sur les vraies données (storage.lire_toutes_alertes).
 """
 
 import html
@@ -18,38 +19,162 @@ import streamlit as st
 from storage import lire_toutes_les_alertes
 
 # ============================================================
-# SETTINGS — persistance simple dans un fichier JSON local
+# ASSETS MANAGEMENT
 # ============================================================
+ASSETS_FILE = "monitored_assets.json"
 SETTINGS_FILE = "app_settings.json"
+
+def charger_assets() -> list:
+    """Charge la liste des assets surveillés depuis le fichier JSON"""
+    if os.path.exists(ASSETS_FILE):
+        try:
+            with open(ASSETS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def sauvegarder_assets(assets: list) -> None:
+    """Sauvegarde la liste des assets surveillés"""
+    with open(ASSETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(assets, f, indent=2, ensure_ascii=False)
+
+def ajouter_asset(asset: str, asset_type: str) -> bool:
+    """Ajoute un nouvel asset à la liste de surveillance"""
+    assets = charger_assets()
+    for a in assets:
+        if a["identifier"].lower() == asset.lower():
+            return False
+    assets.append({
+        "identifier": asset,
+        "type": asset_type,
+        "date_ajout": datetime.now().isoformat()
+    })
+    sauvegarder_assets(assets)
+    return True
+
+def supprimer_asset(asset: str) -> bool:
+    """Supprime un asset de la liste de surveillance"""
+    assets = charger_assets()
+    nouvelle_liste = [a for a in assets if a["identifier"].lower() != asset.lower()]
+    if len(nouvelle_liste) < len(assets):
+        sauvegarder_assets(nouvelle_liste)
+        return True
+    return False
+
+# ============================================================
+# FONCTIONS DE SYNCHRONISATION AVEC APP_SETTINGS.JSON
+# ============================================================
+
+def ajouter_asset_avec_sync(asset: str, asset_type: str) -> bool:
+    """Ajoute un asset et synchronise avec app_settings.json"""
+    assets = charger_assets()
+    for a in assets:
+        if a["identifier"].lower() == asset.lower():
+            return False
+    
+    assets.append({
+        "identifier": asset,
+        "type": asset_type,
+        "date_ajout": datetime.now().isoformat()
+    })
+    sauvegarder_assets(assets)
+    
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            
+            if asset_type == "Domaine":
+                if "monitored_domains" not in settings:
+                    settings["monitored_domains"] = []
+                if asset not in settings["monitored_domains"]:
+                    settings["monitored_domains"].append(asset)
+            elif asset_type == "Email":
+                if "monitored_emails" not in settings:
+                    settings["monitored_emails"] = []
+                if asset not in settings["monitored_emails"]:
+                    settings["monitored_emails"].append(asset)
+            else:
+                if "monitored_keywords" not in settings:
+                    settings["monitored_keywords"] = []
+                if asset not in settings["monitored_keywords"]:
+                    settings["monitored_keywords"].append(asset)
+            
+            if "monitoring_assets" in settings:
+                settings["monitoring_assets"] = [
+                    a for a in settings["monitoring_assets"] 
+                    if not (isinstance(a, dict) and a.get("identifier") == asset) and a != asset
+                ]
+            
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Erreur mise à jour app_settings.json: {e}")
+    
+    return True
+
+def supprimer_asset_avec_sync(asset: str) -> bool:
+    """Supprime un asset et synchronise avec app_settings.json"""
+    assets = charger_assets()
+    nouvelle_liste = [a for a in assets if a["identifier"].lower() != asset.lower()]
+    if len(nouvelle_liste) == len(assets):
+        return False
+    sauvegarder_assets(nouvelle_liste)
+    
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            
+            for key in ["monitored_domains", "monitored_keywords", "monitored_emails", "monitoring_assets"]:
+                if key in settings:
+                    if key == "monitoring_assets":
+                        settings[key] = [
+                            a for a in settings[key] 
+                            if not (isinstance(a, dict) and a.get("identifier") == asset) and a != asset
+                        ]
+                    else:
+                        settings[key] = [a for a in settings[key] if a != asset]
+            
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Erreur mise à jour app_settings.json: {e}")
+    
+    return True
+
+# ============================================================
+# SETTINGS
+# ============================================================
 UPLOADS_DIR = "settings_uploads"
 
 DEFAULT_SETTINGS = {
-    # General
     "general_platform_name": "AEGIS MONITOR",
     "general_timezone": "UTC",
     "general_language": "en",
     "general_logo_filename": None,
-    # Security
     "security_mfa": True,
     "security_session_timeout": "30",
     "security_ip_whitelist": "",
     "security_pwd_min_length": True,
     "security_pwd_upper_lower": True,
     "security_pwd_special": True,
-    # Monitoring
     "monitoring_scan_interval": "2",
     "monitoring_src_hudsonrock": True,
     "monitoring_src_ransomwarelive": True,
     "monitoring_src_checkthesum": True,
     "monitoring_src_ransomlook": True,
+    "monitoring_tunisia_watch": True,
+    "monitoring_apt_watch": True,
+    "monitoring_deepdarkcti": True,
+    "monitoring_wazuh_export": True,
     "monitoring_alert_threshold": "eleve",
-    # Notifications
     "notif_email_enabled": True,
     "notif_slack_enabled": False,
     "notif_pagerduty_enabled": False,
     "notif_email_recipients": "",
     "notif_digest_enabled": False,
-    # Team (liste gérée séparément, sauvegardée immédiatement)
     "team_members": [
         {"email": "soc_lead@company.com", "role": "Admin"},
         {"email": "analyst_1@company.com", "role": "Analyst"},
@@ -57,11 +182,7 @@ DEFAULT_SETTINGS = {
     ],
 }
 
-
 def load_settings() -> dict:
-    """Charge les paramètres depuis settings.json, complète avec les valeurs
-    par défaut si le fichier est absent ou incomplet (première utilisation,
-    ou nouveau champ ajouté depuis la dernière sauvegarde)."""
     data = {}
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -73,15 +194,10 @@ def load_settings() -> dict:
     merged.update(data)
     return merged
 
-
 def save_settings(settings: dict) -> None:
-    """Écrit les paramètres dans settings.json (persistant entre les sessions)."""
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
-
-# Chargé une seule fois par session, avant même set_page_config (aucun rendu
-# Streamlit n'est déclenché par un simple accès à session_state, donc c'est sûr).
 if "app_settings" not in st.session_state:
     st.session_state.app_settings = load_settings()
 
@@ -98,7 +214,24 @@ st.set_page_config(
 )
 
 # ============================================================
-# PALETTE — reprise du DESIGN.md de Stitch (Obsidian Sentinel)
+# SOURCES DISPONIBLES
+# ============================================================
+# Sources de détection (pour le Dashboard et Alerts)
+SOURCES_DETECTION = [
+    {"id": "RansomwareLive", "label": "Ransomware.live", "icon": "🎯", "color": "#ef4444"},
+    {"id": "HudsonRock", "label": "Hudson Rock", "icon": "🎯", "color": "#38bdf8"},
+    {"id": "CheckTheSum", "label": "Check-The-Sum", "icon": "🎯", "color": "#f59e0b"},
+    {"id": "RansomLook", "label": "RansomLook.io", "icon": "🎯", "color": "#8b5cf6"},
+]
+
+# Sources de veille stratégique (pour Ransomware Intel uniquement)
+SOURCES_VEILLE = [
+    {"id": "deepdarkCTI", "label": "deepdarkCTI (veille)", "icon": "📊", "color": "#10b981"},
+    {"id": "APTnotes", "label": "APTnotes (veille)", "icon": "📊", "color": "#f97316"},
+]
+
+# ============================================================
+# PALETTE
 # ============================================================
 C = {
     "bg": "#051424",
@@ -119,22 +252,31 @@ C = {
     "success": "#10b981",
 }
 
-# Sémantique de sévérité
 SEVERITY = {
     "critique": {"color": "#ef4444", "bg": "rgba(239,68,68,0.14)", "label": "Critique"},
     "eleve":    {"color": "#f59e0b", "bg": "rgba(245,158,11,0.14)", "label": "Élevée"},
+    "moyenne":  {"color": "#fbbf24", "bg": "rgba(251,191,36,0.14)", "label": "Moyenne"},
     "faible":   {"color": "#10b981", "bg": "rgba(16,185,129,0.14)", "label": "Faible"},
 }
 DEFAULT_SEV = {"color": C["outline"], "bg": "rgba(135,146,154,0.12)", "label": "Inconnue"}
 
+SEVERITY_RANK = {"critique": 4, "eleve": 3, "moyenne": 2, "faible": 1}
+
+STATUS_META = {
+    "Nouveau": {"dot": "🟡", "color": "#f5a524", "bg": "rgba(245,165,36,0.12)"},
+    "En cours": {"dot": "🔵", "color": "#5b8def", "bg": "rgba(91,141,239,0.12)"},
+    "Traité":   {"dot": "🟢", "color": "#22c55e", "bg": "rgba(34,197,94,0.12)"},
+    "Faux positif": {"dot": "⚪", "color": "#6b7590", "bg": "rgba(107,117,144,0.12)"},
+}
+
+CHECKLIST_ITEMS = ["Analyser l'alerte", "Documenter les preuves", "Archiver"]
+
 NAV_ITEMS = [
     ("dashboard", "dashboard", "Dashboard"),
-    ("darkweb", "security", "Dark Web Monitoring"),
     ("assets", "hub", "Assets"),
     ("alerts", "notifications_active", "Alerts"),
-    ("leaks", "leak_add", "Leaks"),
+    ("ransomware", "gpp_maybe", "Ransomware Intel"),
     ("search", "search", "Search"),
-    ("reports", "assessment", "Reports"),
     ("settings", "settings", "Settings"),
 ]
 
@@ -156,8 +298,6 @@ st.markdown(f"""
     header[data-testid="stHeader"] {{
         background: transparent;
     }}
-
-    /* ---- Sidebar ---- */
     section[data-testid="stSidebar"] {{
         background-color: {C['surface_low']};
         border-right: 1px solid {C['outline_variant']};
@@ -190,8 +330,6 @@ st.markdown(f"""
         text-transform: uppercase; color: {C['on_surface_variant']};
         margin: 2px 0 0 0;
     }}
-
-    /* Boutons de nav dans la sidebar */
     section[data-testid="stSidebar"] div[data-testid="stButton"] > button {{
         width: 100%;
         justify-content: flex-start;
@@ -224,8 +362,6 @@ st.markdown(f"""
     section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"]:hover {{
         background: rgba(56,189,248,0.16) !important;
     }}
-
-    /* ---- Top header ---- */
     .aegis-header {{
         display: flex; justify-content: space-between; align-items: center;
         padding: 0.4rem 0 1rem 0;
@@ -251,14 +387,20 @@ st.markdown(f"""
         70% {{ box-shadow: 0 0 0 6px rgba(56,189,248,0); }}
         100% {{ box-shadow: 0 0 0 0 rgba(56,189,248,0); }}
     }}
-
-    /* ---- Cards / glass ---- */
     .glass-card {{
         background: rgba(15,23,42,0.55);
         backdrop-filter: blur(10px);
         border: 1px solid {C['outline_variant']};
         border-radius: 12px;
         padding: 16px;
+    }}
+    .glass-card-clickable {{
+        cursor: pointer;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .glass-card-clickable:hover {{
+        border-color: {C['accent']};
+        box-shadow: 0 0 20px rgba(56,189,248,0.08);
     }}
     .stat-label {{
         font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
@@ -277,9 +419,16 @@ st.markdown(f"""
         font-size: 15px; font-weight: 700; color: {C['on_surface']};
         margin: 0 0 14px 0; padding-bottom: 12px;
         border-bottom: 1px solid {C['outline_variant']};
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }}
-
-    /* ---- Table ---- */
+    .card-title .click-hint {{
+        font-size: 10px;
+        font-weight: 400;
+        color: {C['on_surface_variant']};
+        margin-left: auto;
+    }}
     table.aegis-table {{ width: 100%; border-collapse: collapse; font-size: 12.5px; }}
     table.aegis-table thead th {{
         text-align: left; font-size: 10.5px; font-weight: 700;
@@ -294,251 +443,108 @@ st.markdown(f"""
         white-space: nowrap;
     }}
     table.aegis-table tbody tr:hover {{ background: rgba(40,54,71,0.35); }}
-    .sev-badge {{
-        display: inline-flex; align-items: center; gap: 5px;
-        font-weight: 600; font-size: 12px;
-    }}
-    .sev-dot {{ width: 6px; height: 6px; border-radius: 50%; }}
-
-    /* ---- Live alert ---- */
-    .live-alert {{
-        background: {C['surface_highest']};
-        border: 1px solid {C['outline_variant']};
-        border-radius: 8px;
-        padding: 10px 12px;
-        margin-bottom: 8px;
-    }}
-    .live-alert-top {{ display: flex; justify-content: space-between; margin-bottom: 4px; }}
-    .live-alert-sev {{ font-size: 10px; font-weight: 700; letter-spacing: 0.05em; }}
-    .live-alert-time {{ font-size: 10px; color: {C['outline']}; font-family: monospace; }}
-    .live-alert-text {{ font-size: 12.5px; color: {C['on_surface']}; line-height: 1.35; }}
-
-    div[data-testid="stMetric"] {{ display: none; }}
-
-    /* ---- Boutons zone principale ---- */
-    .main div[data-testid="stButton"] > button,
-    .main div[data-testid="stPopover"] > button,
-    .main div[data-testid="stDownloadButton"] > button {{
-        background: {C['surface_container']};
-        border: 1px solid {C['outline_variant']};
-        color: {C['on_surface_variant']};
-        border-radius: 6px;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        padding: 0.35rem 0.9rem;
-        white-space: nowrap;
-    }}
-    .main div[data-testid="stButton"] > button:hover,
-    .main div[data-testid="stPopover"] > button:hover,
-    .main div[data-testid="stDownloadButton"] > button:hover {{
-        color: {C['accent']};
-        border-color: {C['accent']};
-    }}
-    .main div[data-testid="stButton"] > button[kind="primary"] {{
-        background: {C['accent']} !important;
-        color: {C['on_primary']} !important;
-        border: none !important;
-    }}
-    .main div[data-testid="stButton"] > button[kind="primary"]:hover {{
-        background: {C['primary']} !important;
-        color: {C['on_primary']} !important;
-    }}
-    .status-pill {{
-        display: inline-flex; align-items: center; gap: 8px;
-        background: rgba(56,189,248,0.10);
-        border: 1px solid {C['accent']};
-        color: {C['accent']};
-        padding: 8px 16px; border-radius: 8px;
-        font-family: monospace; font-size: 12px; font-weight: 700; letter-spacing: 0.05em;
-    }}
-    .tag-chip {{
-        display: inline-block;
-        background: {C['surface_highest']};
-        border: 1px solid {C['outline_variant']};
-        border-radius: 5px;
-        padding: 4px 8px;
-        font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
-        color: {C['on_surface']};
-        font-family: monospace;
-        margin: 0 6px 6px 0;
-    }}
-    .overview-row {{
-        display: flex; justify-content: space-between; align-items: center;
-        padding: 8px 0;
-    }}
-    .overview-icon {{
-        width: 30px; height: 30px; border-radius: 6px;
-        display: flex; align-items: center; justify-content: center;
-        flex-shrink: 0;
-    }}
-    .timeline-wrap {{ position: relative; padding-left: 4px; }}
-    .timeline-line {{
-        position: absolute; left: 19px; top: 6px; bottom: 6px;
-        width: 2px; background: {C['outline_variant']}; z-index: 0;
-    }}
-    .timeline-item {{ position: relative; z-index: 1; display: flex; gap: 14px; margin-bottom: 16px; }}
-    .timeline-dot-wrap {{
-        width: 40px; height: 40px; border-radius: 50%;
-        background: {C['surface']}; flex-shrink: 0;
-        display: flex; align-items: center; justify-content: center;
-        margin-top: 2px; z-index: 1;
-    }}
-    .timeline-dot {{ width: 12px; height: 12px; border-radius: 50%; }}
-    .timeline-card {{
-        flex: 1; background: rgba(15,23,42,0.5);
-        border-radius: 10px; padding: 14px 16px;
-    }}
-    .timeline-badge {{
-        font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
-        padding: 2px 8px; border-radius: 4px; margin-right: 8px;
-    }}
-    .timeline-meta {{
-        display: flex; gap: 16px; font-size: 11px; font-family: monospace;
-        color: {C['on_surface_variant']}; margin-top: 8px;
-    }}
-
     .badge-pill {{
         display: inline-flex; align-items: center; gap: 4px;
         padding: 2px 9px; border-radius: 4px;
         font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
         text-transform: uppercase; white-space: nowrap;
     }}
-    .data-toolbar {{
-        display: flex; justify-content: space-between; align-items: center;
-        padding: 12px 16px; border-bottom: 1px solid {C['outline_variant']};
-        background: rgba(29,43,60,0.35);
-    }}
-    .pagination-info {{
-        font-size: 12px; color: {C['on_surface_variant']}; font-family: monospace;
-    }}
-    .asset-name-cell {{ display:flex; align-items:center; gap:8px; }}
-    .asset-dot {{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }}
-
-    .main div[data-testid="stTextInput"] input {{
-        background: {C['surface_container']};
+    .tag-chip {{
+        display: inline-block;
+        background: {C['surface_highest']};
         border: 1px solid {C['outline_variant']};
-        color: {C['on_surface']};
-        border-radius: 6px;
-        font-size: 13px;
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: {C['on_surface_variant']};
+        font-family: monospace;
+        margin: 0 4px 4px 0;
+        cursor: pointer;
+        transition: border-color 0.2s ease, color 0.2s ease;
     }}
-    .main div[data-testid="stTextInput"] input:focus {{
+    .tag-chip:hover {{
         border-color: {C['accent']};
-        box-shadow: 0 0 0 1px {C['accent']};
+        color: {C['accent']};
     }}
-    .main div[data-testid="stSelectbox"] > div > div {{
-        background: {C['surface_container']};
-        border: 1px solid {C['outline_variant']};
-        border-radius: 6px;
-    }}
-    .back-link {{
-        display: inline-flex; align-items: center; gap: 6px;
-        color: {C['on_surface_variant']}; font-size: 12px; font-weight: 600;
-        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+    .overview-row {{
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 6px 0;
     }}
     .progress-track {{
-        height: 6px; width: 100%; background: {C['surface_highest']};
-        border-radius: 999px; overflow: hidden;
+        height: 4px;
+        width: 100%;
+        background: {C['surface_highest']};
+        border-radius: 999px;
+        overflow: hidden;
+        margin-top: 4px;
     }}
     .progress-fill {{
-        height: 100%; border-radius: 999px;
+        height: 100%;
+        border-radius: 999px;
     }}
-    .search-hit {{
-        background: {C['surface_highest']};
-        padding: 1px 4px; border-radius: 3px; font-weight: 700;
+    .info-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
     }}
-
-    /* ---- Settings page specific styles ---- */
-    .settings-card {{
-        background: rgba(15,23,42,0.55);
-        border: 1px solid {C['outline_variant']};
-        border-radius: 12px;
-        overflow: hidden;
+    .info-item {{
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        font-size: 12.5px;
+        border-bottom: 1px solid rgba(30,41,59,0.2);
     }}
-    .settings-card-header {{
-        border-bottom: 1px solid {C['outline_variant']};
-        background: rgba(14,28,45,0.5);
-        padding: 14px 24px;
-        display: flex; align-items: center; gap: 8px;
-    }}
-    .settings-card-title {{
-        font-size: 15px; font-weight: 700; color: {C['on_surface']};
-    }}
-    .settings-field-label {{
-        font-size: 13px; font-weight: 600; color: {C['on_surface']};
-        display: block; margin-bottom: 2px;
-    }}
-    .settings-field-help {{
-        font-size: 12px; color: {C['on_surface_variant']}; margin: 0;
-    }}
-    .settings-nav-item {{
-        display: flex; align-items: center; gap: 12px;
-        padding: 10px 14px; border-radius: 6px;
-        border-left: 2px solid transparent;
+    .info-item .label {{
         color: {C['on_surface_variant']};
-        font-size: 14px; font-weight: 500;
     }}
-    .settings-divider {{
-        border: none;
-        border-top: 1px solid {C['outline_variant']};
-        margin: 4px 0 16px 0;
-        opacity: 0.5;
+    .info-item .value {{
+        color: {C['on_surface']};
+        font-family: monospace;
     }}
-    .settings-team-row {{
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 8px 12px; border: 1px solid {C['outline_variant']};
-        border-radius: 6px; background: rgba(1,15,31,0.3);
-        margin-bottom: 8px;
+    .modal-overlay {{
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(5, 20, 36, 0.85);
+        z-index: 999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        backdrop-filter: blur(4px);
     }}
-    .settings-role-badge {{
-        font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 4px;
-    }}
-    /* ---- Settings nav buttons (Streamlit) ---- */
-    .settings-nav-btn div[data-testid="stButton"] > button {{
-        justify-content: flex-start !important;
-        text-align: left !important;
-        padding: 10px 14px !important;
-        font-size: 14px !important;
-        font-weight: 500 !important;
-        background: transparent !important;
-        border: none !important;
-        border-left: 2px solid transparent !important;
-        border-radius: 6px !important;
-        color: {C['on_surface_variant']} !important;
-        width: 100% !important;
-        white-space: nowrap !important;
-        text-transform: none !important;
-        letter-spacing: normal !important;
-    }}
-    .settings-nav-btn div[data-testid="stButton"] > button:hover {{
-        background: rgba(40,54,71,0.4) !important;
-        color: {C['on_surface']} !important;
-    }}
-    .settings-nav-btn div[data-testid="stButton"] > button[kind="primary"] {{
-        color: {C['accent']} !important;
-        background: rgba(56,189,248,0.10) !important;
-        border-left: 2px solid {C['accent']} !important;
-    }}
-    .settings-nav-btn div[data-testid="stButton"] > button[kind="primary"]:hover {{
-        background: rgba(56,189,248,0.16) !important;
+    .modal-content {{
+        background: #0e1c2d;
+        border: 1px solid #1e293b;
+        border-radius: 16px;
+        padding: 32px;
+        max-width: 560px;
+        width: 90%;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     }}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# DONNÉES
+# FONCTIONS UTILITAIRES
 # ============================================================
 @st.cache_data(ttl=60)
 def charger_donnees() -> pd.DataFrame:
     colonnes = ["id", "source_api", "type", "asset_recherche", "asset_concerne",
-                "details", "date_detection", "severity", "date_insertion"]
+                "details", "date_detection", "severity", "date_insertion",
+                "country", "sector"]
     alertes = lire_toutes_les_alertes()
     df = pd.DataFrame(alertes, columns=colonnes)
     if not df.empty:
         df["date_insertion_dt"] = pd.to_datetime(df["date_insertion"], errors="coerce")
+        df["date_detection_dt"] = pd.to_datetime(df["date_detection"], errors="coerce", utc=True)
+        df["date_tri"] = df["date_detection_dt"].fillna(df["date_insertion_dt"])
     return df
-
 
 def temps_relatif(dt) -> str:
     if pd.isna(dt):
@@ -553,22 +559,24 @@ def temps_relatif(dt) -> str:
         return f"il y a {s // 3600} h"
     return f"il y a {s // 86400} j"
 
-
 def sev_meta(sev: str) -> dict:
     return SEVERITY.get((sev or "").lower(), DEFAULT_SEV)
-
 
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip("#")
     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
     return f"rgba({r},{g},{b},{alpha})"
 
+def country_to_flag(code: str) -> str:
+    if not code or len(code) != 2 or not code.isalpha():
+        return "🏳️"
+    code = code.upper()
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
 
 def badge_pill(label: str, color: str, bg: str, border: str = None) -> str:
     border = border or f"{color}55"
     return (f'<span class="badge-pill" style="color:{color}; background:{bg}; '
             f'border:1px solid {border};">{html.escape(label)}</span>')
-
 
 def classify_asset_type(valeur: str) -> str:
     v = (valeur or "").strip()
@@ -582,9 +590,6 @@ def classify_asset_type(valeur: str) -> str:
 
 ASSET_TYPE_ICON = {"Domaine": "language", "Adresse IP": "dns", "Email": "mail", "Mot-clé": "sell"}
 
-SEVERITY_RANK = {"critique": 3, "eleve": 2, "faible": 1}
-
-
 def paginer(df: pd.DataFrame, session_key: str, taille_page: int = 10):
     total = len(df)
     total_pages = max((total - 1) // taille_page + 1, 1)
@@ -595,7 +600,6 @@ def paginer(df: pd.DataFrame, session_key: str, taille_page: int = 10):
     debut = (page - 1) * taille_page
     fin = min(debut + taille_page, total)
     return df.iloc[debut:fin], page, total_pages, debut + 1 if total else 0, fin, total
-
 
 def controles_pagination(session_key: str, page: int, total_pages: int, key_prefix: str):
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -612,7 +616,232 @@ def controles_pagination(session_key: str, page: int, total_pages: int, key_pref
             st.session_state[session_key] = page + 1
             st.rerun()
 
+def extract_infostealer_details(details: str) -> dict:
+    result = {}
+    if not details:
+        return result
+    patterns = {
+        "total": r"Total comptes compromis:\s*(\d+)",
+        "employes": r"Employés:\s*(\d+)",
+        "utilisateurs": r"Utilisateurs:\s*(\d+)",
+        "services_corporate": r"Services corporate:\s*(\d+)",
+        "services_perso": r"Services perso:\s*(\d+)",
+        "ordinateur": r"Ordinateur infecté\s*\(([^)]+)\)",
+        "computer_name": r"computer_name['\"]?\s*:\s*['\"]([^'\"]+)",
+        "infecte_depuis": r"Infecté depuis:\s*([^,\s]+)",
+        "date_compromised": r"date_compromised['\"]?\s*:\s*['\"]([^'\"]+)",
+    }
+    for key, pattern in patterns.items():
+        match = _re.search(pattern, details, _re.IGNORECASE)
+        if match:
+            result[key] = match.group(1)
+    return result
 
+def extract_ransomware_details(details: str) -> dict:
+    result = {}
+    if not details:
+        return result
+    patterns = {
+        "groupe": r"Groupe ransomware:\s*([^,]+)",
+        "entreprise": r"Entreprise:\s*([^,]+)",
+        "site": r"Site:\s*([^,\s]+)",
+    }
+    for key, pattern in patterns.items():
+        match = _re.search(pattern, details, _re.IGNORECASE)
+        if match:
+            result[key] = match.group(1).strip()
+    return result
+
+def type_meta(t: str) -> dict:
+    TYPE_META = {
+        "infostealer_compromise": {"label": "Infostealer Compromise", "icon": "password"},
+        "ransomware_leak": {"label": "Ransomware Leak", "icon": "lock_open"},
+        "credential_leak": {"label": "Credential Leak", "icon": "key"},
+        "domain_mention": {"label": "Domain Mention", "icon": "language"},
+        "malicious_infrastructure_mention": {"label": "Malicious Infrastructure Mention", "icon": "dns"},
+        "ransomware_leak_tn": {"label": "Ransomware Leak (Tunisia)", "icon": "flag"},
+        "ransomware_leak_pays": {"label": "Ransomware Leak (Pays surveillé)", "icon": "flag"},
+        "ransomware_global_feed": {"label": "Ransomware Global Feed", "icon": "public"},
+        "apt_mention": {"label": "APT Report Mention", "icon": "travel_explore"},
+        "deepdarkcti_status": {"label": "deepdarkCTI Status", "icon": "network_check"},
+        "infostealer_email_check": {"label": "Infostealer Email Check", "icon": "mail"},
+    }
+    return TYPE_META.get(t, {"label": (t or "Inconnu").replace("_", " ").title(), "icon": "report"})
+
+def get_recommended_actions(type_: str) -> list:
+    TYPE_ACTIONS = {
+        "infostealer_compromise": [
+            "🔑 Forcer la réinitialisation des identifiants des machines/comptes infectés.",
+            "🔄 Révoquer les sessions actives et les tokens associés aux postes compromis.",
+            "🛡️ Activer la MFA sur tous les comptes concernés.",
+        ],
+        "credential_leak": [
+            "🔑 Effectuer une rotation immédiate des identifiants exposés.",
+            "🛡️ Activer la MFA sur tous les comptes concernés par la fuite.",
+            "🔍 Analyser les logs pour détecter des utilisations suspectes.",
+        ],
+        "ransomware_leak": [
+            "🛑 Isoler les systèmes concernés et vérifier l'intégrité des sauvegardes.",
+            "📢 Notifier les parties prenantes conformément au plan de réponse aux incidents.",
+            "🔍 Analyser la nature des données exposées.",
+        ],
+        "domain_mention": [
+            "🔍 Analyser le contexte de la mention pour évaluer la pertinence de la menace.",
+            "📡 Surveiller les activités suspectes liées à ce domaine dans les prochains jours.",
+        ],
+    }
+    return TYPE_ACTIONS.get(type_, [
+        "🔍 Analyser le contenu de l'alerte pour qualifier le niveau de risque réel.",
+        "📤 Escalader vers l'équipe SOC si la sévérité est confirmée.",
+    ])
+
+EXPOSED_FIELD_KEYWORDS = {
+    "password": "Mots de passe",
+    "mot de passe": "Mots de passe",
+    "email": "Adresses email",
+    "e-mail": "Adresses email",
+    "api key": "Clés API",
+    "api_key": "Clés API",
+    "credit card": "Cartes bancaires",
+    "carte bancaire": "Cartes bancaires",
+    "token": "Tokens",
+    "cookie": "Cookies",
+    "ip address": "Adresses IP",
+    "adresse ip": "Adresses IP",
+    "ssn": "Numéros d'identité",
+    "hash": "Empreintes / Hashs",
+    "username": "Identifiants",
+    "login": "Identifiants",
+}
+
+def extract_exposed_fields(details: str) -> list:
+    if not details:
+        return []
+    d = details.lower()
+    trouves = []
+    for kw, label in EXPOSED_FIELD_KEYWORDS.items():
+        if kw in d and label not in trouves:
+            trouves.append(label)
+    return trouves
+
+def get_source_url(source_api: str, asset: str = "") -> str:
+    """Retourne l'URL de la source en fonction de l'API"""
+    source_urls = {
+        "RansomwareLive": "https://ransomware.live",
+        "HudsonRock": "https://cavalier.hudsonrock.com",
+        "CheckTheSum": "https://www.check-the-sum.fr",
+        "RansomLook": "https://www.ransomlook.io",
+        "APTnotes": "https://github.com/aptnotes/data",
+        "deepdarkCTI": "https://github.com/fastfire/deepdarkCTI",
+    }
+    return source_urls.get(source_api, "#")
+
+# ============================================================
+# EXTRACTION STRUCTURÉE DES DÉTAILS PAR TYPE D'ALERTE
+# ============================================================
+
+def extraire_infos_ransomware_leak(details: str) -> dict:
+    """Extrait les informations d'une alerte ransomware_leak"""
+    result = {
+        "groupe": "Non spécifié",
+        "entreprise": "Non spécifiée",
+        "site": "Non spécifié"
+    }
+    if not details:
+        return result
+    
+    patterns = {
+        "groupe": r"Groupe ransomware:\s*([^,]+)",
+        "entreprise": r"Entreprise:\s*([^,]+)",
+        "site": r"Site:\s*([^,\s]+)",
+    }
+    for key, pattern in patterns.items():
+        match = _re.search(pattern, details, _re.IGNORECASE)
+        if match:
+            result[key] = match.group(1).strip()
+    return result
+
+
+def extraire_infos_infostealer_compromise(details: str) -> dict:
+    """Extrait les informations d'une alerte infostealer_compromise"""
+    result = {
+        "total": "0",
+        "employes": "0",
+        "utilisateurs": "0"
+    }
+    if not details:
+        return result
+    
+    patterns = {
+        "total": r"Total comptes compromis:\s*(\d+)",
+        "employes": r"Employés:\s*(\d+)",
+        "utilisateurs": r"Utilisateurs:\s*(\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = _re.search(pattern, details, _re.IGNORECASE)
+        if match:
+            result[key] = match.group(1)
+    return result
+
+
+def extraire_infos_infostealer_email(details: str) -> dict:
+    """Extrait les informations d'une alerte infostealer_email_check"""
+    result = {
+        "ordinateur": "Inconnu",
+        "services_corporate": "0",
+        "services_perso": "0",
+        "infecte_depuis": "Inconnue"
+    }
+    if not details:
+        return result
+    
+    patterns = {
+        "ordinateur": r"Ordinateur infecté\s*\(([^)]+)\)",
+        "computer_name": r"computer_name['\"]?\s*:\s*['\"]([^'\"]+)",
+        "services_corporate": r"Services corporate:\s*(\d+)",
+        "services_perso": r"Services perso:\s*(\d+)",
+        "infecte_depuis": r"Infecté depuis:\s*([^,\s]+)",
+        "date_compromised": r"date_compromised['\"]?\s*:\s*['\"]([^'\"]+)",
+    }
+    for key, pattern in patterns.items():
+        match = _re.search(pattern, details, _re.IGNORECASE)
+        if match:
+            result[key] = match.group(1)
+    return result
+
+
+def extraire_infos_generiques(details: str) -> dict:
+    """Extrait les informations génériques d'une alerte"""
+    result = {}
+    if not details:
+        return result
+    
+    # Recherche de mots-clés communs
+    if "credential" in details.lower() or "mot de passe" in details.lower():
+        result["type_donnees"] = "Identifiants"
+    if "email" in details.lower():
+        result["type_donnees"] = "Emails"
+    if "api" in details.lower() or "token" in details.lower():
+        result["type_donnees"] = "Tokens/Clés API"
+    
+    return result
+
+
+def extraire_infos_specifiques_alerte(type_alerte: str, details: str) -> dict:
+    """Extrait les informations spécifiques selon le type d'alerte"""
+    if not details:
+        return {"raw": details}
+    
+    if type_alerte in ["ransomware_leak", "ransomware_leak_tn", "ransomware_leak_pays"]:
+        return extraire_infos_ransomware_leak(details)
+    elif type_alerte == "infostealer_compromise":
+        return extraire_infos_infostealer_compromise(details)
+    elif type_alerte == "infostealer_email_check":
+        return extraire_infos_infostealer_email(details)
+    elif type_alerte == "credential_leak":
+        return extraire_infos_generiques(details)
+    else:
+        return {"raw": details}
 # ============================================================
 # NAVIGATION
 # ============================================================
@@ -651,7 +880,6 @@ with st.sidebar:
                 st.session_state["leak_detail_id"] = None
             st.rerun()
 
-
 # ============================================================
 # PAGE : DASHBOARD
 # ============================================================
@@ -668,11 +896,12 @@ def page_dashboard():
     """, unsafe_allow_html=True)
 
     if df.empty:
-        st.info("Aucune alerte en base pour le moment. Lance le pipeline de collecte (main.py) pour peupler le dashboard.")
+        st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour peupler le dashboard.")
         return
 
     periode = st.radio("Période", ["7D", "30D", "90D", "Tout"], horizontal=True,
                         label_visibility="collapsed", index=1)
+
     if periode == "Tout":
         df_periode = df
     else:
@@ -683,40 +912,46 @@ def page_dashboard():
     total = len(df_periode)
     critiques = int((df_periode["severity"] == "critique").sum())
     elevees = int((df_periode["severity"] == "eleve").sum())
-    actives = critiques + elevees
-    sources = df_periode["source_api"].nunique()
+    moyennes = int((df_periode["severity"] == "moyenne").sum())
+    faibles = int((df_periode["severity"] == "faible").sum())
+    actives = critiques + elevees + moyennes
+    sources_actives = df_periode["source_api"].nunique()
     assets_surveilles = df_periode["asset_recherche"].nunique()
     derniere = df_periode["date_insertion_dt"].max() if df_periode["date_insertion_dt"].notna().any() else None
 
     stats = [
-        ("Total Alertes", f"{total:,}".replace(",", " "), "database", None),
-        ("Alertes Actives", str(actives), "warning", f"critique + élevée"),
-        ("Critiques", str(critiques), "local_fire_department", "Action immédiate requise" if critiques else "Aucune"),
-        ("Sources Actives", str(sources), "hub", ", ".join(sorted(df_periode["source_api"].unique())) if sources else "Aucune"),
-        ("Assets Surveillés", str(assets_surveilles), "dns", None),
-        ("Dernière Détection", temps_relatif(derniere) if derniere is not None else "—", "schedule", None),
+        {"label": "Total Alertes", "value": f"{total:,}".replace(",", " "), "icon": "database", "color": C["accent"], "sub": None},
+        {"label": "Alertes Actives", "value": str(actives), "icon": "warning", "sub": "critique + élevée + moyenne", "color": "#ef4444" if actives > 0 else C["accent"]},
+        {"label": "Critiques", "value": str(critiques), "icon": "local_fire_department", "sub": "Action immédiate" if critiques else "Aucune", "color": "#ef4444"},
+        {"label": "Élevées", "value": str(elevees), "icon": "trending_up", "sub": "Priorité haute" if elevees else "Aucune", "color": "#f59e0b"},
+        {"label": "Moyennes", "value": str(moyennes), "icon": "remove", "sub": "À surveiller" if moyennes else "Aucune", "color": "#fbbf24"},
+        {"label": "Faibles", "value": str(faibles), "icon": "info", "sub": "Information" if faibles else "Aucune", "color": "#10b981"},
     ]
 
     cols = st.columns(6)
-    icon_colors = [C["accent"], "#ef4444", "#ef4444", "#f59e0b", C["accent"], C["outline"]]
-    for col, (label, value, icon, sub), icolor in zip(cols, stats, icon_colors):
+    for col, stat in zip(cols, stats):
         with col:
+            sub_html = ""
+            if stat.get("sub") and stat["sub"] != "&nbsp;":
+                sub_html = f'<div class="stat-sub" style="font-size:9px; margin-top:2px;">{html.escape(str(stat["sub"]))}</div>'
+            
             st.markdown(f"""
-            <div class="glass-card">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <span class="stat-label">{html.escape(label)}</span>
-                    <span class="material-symbols-outlined" style="font-size:16px; color:{icolor};">{icon}</span>
+            <div class="glass-card" style="text-align:center; border-top: 2px solid {stat['color']}; padding:12px;">
+                <div style="display:flex; justify-content:center; align-items:center; gap:6px; margin-bottom:2px;">
+                    <span class="material-symbols-outlined" style="font-size:16px; color:{stat['color']};">{stat['icon']}</span>
+                    <span class="stat-label" style="font-size:9px;">{html.escape(stat['label'])}</span>
                 </div>
-                <div class="stat-value">{html.escape(value)}</div>
-                <div class="stat-sub">{html.escape(sub) if sub else '&nbsp;'}</div>
+                <div class="stat-value" style="font-size:24px; color:{stat['color']}; margin-top:2px;">
+                    {html.escape(str(stat['value']))}
+                </div>
+                {sub_html}
             </div>
             """, unsafe_allow_html=True)
 
-    st.write("")
-    col_left, col_right = st.columns([2, 1])
+    col_chart, col_pie = st.columns([2, 1])
 
-    with col_left:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    with col_chart:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">Threat Activity Over Time</div>', unsafe_allow_html=True)
 
         if df_periode.empty or df_periode["date_insertion_dt"].isna().all():
@@ -724,432 +959,618 @@ def page_dashboard():
         else:
             tmp = df_periode.dropna(subset=["date_insertion_dt"]).copy()
             tmp["jour"] = tmp["date_insertion_dt"].dt.date
-            total_par_jour = tmp.groupby("jour").size()
-            crit_par_jour = tmp[tmp["severity"] == "critique"].groupby("jour").size()
-
-            idx = pd.date_range(total_par_jour.index.min(), total_par_jour.index.max(), freq="D").date
-            total_par_jour = total_par_jour.reindex(idx, fill_value=0)
-            crit_par_jour = crit_par_jour.reindex(idx, fill_value=0)
+            idx = pd.date_range(tmp["jour"].min(), tmp["jour"].max(), freq="D").date
 
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=idx, y=total_par_jour.values, name="Total détections",
-                mode="lines", line=dict(color=C["accent"], width=2, shape="spline"),
-                fill="tozeroy", fillcolor="rgba(56,189,248,0.15)",
-            ))
-            fig.add_trace(go.Scatter(
-                x=idx, y=crit_par_jour.values, name="Critiques",
-                mode="lines", line=dict(color="#ef4444", width=1.5, shape="spline"),
-                fill="tozeroy", fillcolor="rgba(239,68,68,0.10)",
-            ))
+            
+            colors = {"critique": "#ef4444", "eleve": "#f97316", "moyenne": "#fbbf24", "faible": "#10b981"}
+            
+            for sev in ["critique", "eleve", "moyenne", "faible"]:
+                serie = tmp[tmp["severity"] == sev].groupby("jour").size().reindex(idx, fill_value=0)
+                if serie.sum() > 0:
+                    fig.add_trace(go.Scatter(
+                        x=idx, y=serie.values, 
+                        name=SEVERITY[sev]["label"],
+                        mode="lines+markers", 
+                        line=dict(color=colors[sev], width=2.5),
+                        marker=dict(size=6, color=colors[sev], symbol="circle"),
+                        fill="tozeroy", 
+                        fillcolor=hex_to_rgba(colors[sev], 0.10),
+                    ))
+
             fig.update_layout(
-                height=260, margin=dict(l=0, r=0, t=10, b=0),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=280,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color=C["on_surface_variant"], size=11, family="Inter"),
-                xaxis=dict(showgrid=False, color=C["outline"]),
-                yaxis=dict(showgrid=True, gridcolor=C["outline_variant"], gridwidth=1, zeroline=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                            bgcolor="rgba(0,0,0,0)"),
+                xaxis=dict(
+                    showgrid=False, 
+                    color=C["outline"],
+                    tickformat="%b %d",
+                    tickangle=0,
+                ),
+                yaxis=dict(
+                    showgrid=True, 
+                    gridcolor=C["outline_variant"], 
+                    gridwidth=1, 
+                    zeroline=False,
+                    title="",
+                ),
+                legend=dict(
+                    orientation="h", 
+                    yanchor="bottom", 
+                    y=1.02, 
+                    xanchor="left", 
+                    x=0,
+                    bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=11),
+                ),
                 hovermode="x unified",
             )
             st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with col_right:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    with col_pie:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">Risk Distribution</div>', unsafe_allow_html=True)
 
         rep = df_periode["severity"].value_counts()
-        labels_ordre = ["critique", "eleve", "faible"]
+        labels_ordre = ["critique", "eleve", "moyenne", "faible"]
         valeurs = [int(rep.get(s, 0)) for s in labels_ordre]
         couleurs = [SEVERITY[s]["color"] for s in labels_ordre]
         labels_fr = [SEVERITY[s]["label"] for s in labels_ordre]
+        
+        total = sum(valeurs)
 
         fig2 = go.Figure(data=[go.Pie(
-            labels=labels_fr, values=valeurs, hole=0.68,
-            marker=dict(colors=couleurs, line=dict(color=C["surface_low"], width=2)),
-            textinfo="none",
+            labels=labels_fr, 
+            values=valeurs, 
+            hole=0.60,
+            marker=dict(
+                colors=couleurs, 
+                line=dict(color=C["surface"], width=3)
+            ),
+            textinfo="percent+label",
+            textposition="auto",
+            textfont=dict(color=C["on_surface"], size=10),
+            showlegend=False,
+            hoverinfo="label+percent+value",
+            hovertemplate="%{label}<br>%{value} alertes (%{percent})<extra></extra>",
+            automargin=True,
+            sort=False,
         )])
         fig2.update_layout(
-            height=200, margin=dict(l=0, r=0, t=0, b=0),
+            height=280,
+            margin=dict(l=10, r=10, t=10, b=10),
             paper_bgcolor="rgba(0,0,0,0)",
-            showlegend=False,
-            annotations=[dict(
-                text=f"<b style='font-size:24px;color:{C['on_surface']}'>{total}</b><br>"
-                     f"<span style='font-size:9px;color:{C['outline']}'>TOTAL ALERTES</span>",
-                showarrow=False,
-            )],
+            annotations=[
+                dict(
+                    text=f"<b style='font-size:22px;color:{C['on_surface']}'>{total}</b><br>"
+                         f"<span style='font-size:9px;color:{C['outline']}'>TOTAL</span>",
+                    showarrow=False,
+                    font=dict(size=14),
+                )
+            ],
         )
         st.plotly_chart(fig2, width="stretch", config={"displayModeBar": False})
 
-        legend_html = "<div style='display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; font-size:12px;'>"
+        legend_html = '<div style="display:flex; justify-content:center; gap:16px; margin-top:4px; flex-wrap:wrap;">'
         for s, lbl in zip(labels_ordre, labels_fr):
-            legend_html += (f"<div style='display:flex;align-items:center;gap:6px;color:{C['on_surface_variant']}'>"
-                             f"<span style='width:8px;height:8px;border-radius:50%;background:{SEVERITY[s]['color']}'></span>"
-                             f"{lbl} ({int(rep.get(s, 0))})</div>")
-        legend_html += "</div>"
+            count = int(rep.get(s, 0))
+            pct = round(count / total * 100, 1) if total > 0 else 0
+            legend_html += (f'<div style="display:flex;align-items:center;gap:4px;color:{C["on_surface_variant"]};font-size:12px;">'
+                             f'<span style="width:10px;height:10px;border-radius:50%;background:{SEVERITY[s]["color"]};"></span>'
+                             f'{lbl} ({count}) - {pct}%</div>')
+        legend_html += '</div>'
         st.markdown(legend_html, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.write("")
-    col_table, col_live = st.columns([3, 1])
+    col_left_grid, col_right_grid = st.columns(2)
 
-    with col_table:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        h1, h2 = st.columns([5, 1])
-        h1.markdown('<div class="card-title" style="border:none; margin-bottom:6px;">Recent Detections</div>', unsafe_allow_html=True)
-        with h2:
-            if st.button("Voir tout →", key="voir_tout_detections"):
-                st.session_state.page = "darkweb"
-                st.rerun()
+    with col_left_grid:
+        st.markdown('<div class="bg-panel" style="margin-bottom:12px; padding:16px;">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(30,41,59,0.5); padding-bottom:10px; margin-bottom:14px;">
+            <h2 style="font-size:14px; font-weight:600; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+                <svg width="16" height="16" fill="none" stroke="#22d3ee" viewBox="0 0 24 24" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Scan Integrity
+            </h2>
+        </div>
+        """, unsafe_allow_html=True)
 
-        recent = df.sort_values("date_insertion_dt", ascending=False).head(8)
+        derniere = df["date_insertion_dt"].max() if df["date_insertion_dt"].notna().any() else None
+
+        st.markdown(f"""
+        <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:13px; align-items:center;">
+            <div style="color:{C['on_surface_variant']};">Last Global Scan</div>
+            <div style="color:{C['on_surface']}; font-weight:500; text-align:right;">
+                {temps_relatif(derniere) if derniere is not None else '—'}
+            </div>
+            <div style="color:{C['on_surface_variant']};">Next Scheduled</div>
+            <div style="color:{C['on_surface']}; font-weight:500; text-align:right;">Continuous (2 min)</div>
+            <div style="color:{C['on_surface_variant']};">Status</div>
+            <div style="color:#10b981; font-weight:500; text-align:right;">
+                <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#10b981;margin-right:6px;"></span>Completed
+            </div>
+            <div style="color:{C['on_surface_variant']};">Sources Active</div>
+            <div style="color:{C['on_surface']}; font-weight:500; text-align:right;">{df["source_api"].nunique()}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="bg-panel" style="padding:16px;">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(30,41,59,0.5); padding-bottom:10px; margin-bottom:14px;">
+            <h2 style="font-size:14px; font-weight:600; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+                <svg width="16" height="16" fill="none" stroke="#f97316" viewBox="0 0 24 24" stroke-width="2"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Assets Monitored
+            </h2>
+            <span style="font-size:10px; color:#22d3ee; cursor:pointer;">cliquer pour voir les détails</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        assets_uniques = sorted(df["asset_recherche"].dropna().unique().tolist())
+        if assets_uniques:
+            for asset in assets_uniques[:10]:
+                count = len(df[df["asset_recherche"] == asset])
+                if st.button(f"{asset} ({count})", key=f"asset_new_{asset}"):
+                    st.session_state["alerts_search"] = str(asset)
+                    st.session_state.page = "alerts"
+                    st.rerun()
+            if len(assets_uniques) > 10:
+                st.caption(f"+ {len(assets_uniques) - 10} autres assets")
+        else:
+            st.caption("Aucun asset surveillé")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_right_grid:
+        # ============================================================
+        # SECTION SOURCES MONITORED - UNIQUEMENT LES SOURCES DE DÉTECTION
+        # ============================================================
+        st.markdown('<div class="bg-panel" style="margin-bottom:12px; padding:16px;">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(30,41,59,0.5); padding-bottom:10px; margin-bottom:14px;">
+            <h2 style="font-size:14px; font-weight:600; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+                <svg width="16" height="16" fill="none" stroke="#94a3b8" viewBox="0 0 24 24" stroke-width="2"><path d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Sources Monitored
+            </h2>
+            <span style="font-size:10px; padding:2px 8px; border:1px solid #475569; border-radius:4px; color:#94a3b8; cursor:pointer;">cliquer pour filtrer</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Récupérer les sources qui ont des données dans la base
+        sources_avec_donnees = set(df["source_api"].dropna().unique().tolist()) if not df.empty else set()
+        
+        # Afficher UNIQUEMENT les sources de détection
+        for src in SOURCES_DETECTION:
+            src_id = src["id"]
+            count = len(df[df["source_api"] == src_id]) if not df.empty else 0
+            has_data = src_id in sources_avec_donnees
+            
+            # Déterminer le statut
+            if has_data:
+                if count > 0:
+                    status_icon = "✅"
+                    status_text = f"ACTIF ({count})"
+                    status_color = C["accent"]
+                else:
+                    status_icon = "🟡"
+                    status_text = "ACTIF (0)"
+                    status_color = C["outline"]
+            else:
+                status_icon = "⏳"
+                status_text = "EN ATTENTE"
+                status_color = C["outline"]
+            
+            # Bouton avec le statut
+            button_label = f"{status_icon} {src['label']} {status_text}"
+            
+            if st.button(button_label, key=f"src_dashboard_{src_id}", use_container_width=True):
+                if has_data:
+                    st.session_state["alerts_f_source"] = src_id
+                    st.session_state.page = "alerts"
+                    st.rerun()
+                else:
+                    st.toast(f"ℹ️ Source '{src['label']}' active mais sans données pour le moment", icon="ℹ️")
+        
+        # Note sur les sources de veille
+        st.markdown("""
+        <div style="margin-top:12px; padding:8px 12px; background:rgba(16,185,129,0.08); border-radius:6px; border-left:3px solid #10b981;">
+            <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-size:11px; color:#10b981;">📊</span>
+                <span style="font-size:10px; color:#94a3b8;">
+                    Sources de veille stratégique (<strong>deepdarkCTI</strong> et <strong>APTnotes</strong>) 
+                    disponibles dans l'interface <strong>Ransomware Intel</strong>
+                </span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="bg-panel" style="padding:16px;">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(30,41,59,0.5); padding-bottom:10px; margin-bottom:14px;">
+            <h2 style="font-size:14px; font-weight:600; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+                <svg width="16" height="16" fill="none" stroke="#22d3ee" viewBox="0 0 24 24" stroke-width="2"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Detection Overview
+            </h2>
+            <span style="font-size:10px; padding:2px 8px; border:1px solid #475569; border-radius:4px; color:#94a3b8; cursor:pointer;">cliquer pour filtrer</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        rep_types = df_periode["type"].value_counts()
+        if not rep_types.empty:
+            for t, count in rep_types.head(6).items():
+                meta = type_meta(t)
+                # Ne pas afficher les types de veille dans cette section
+                if t not in ["deepdarkcti_status", "apt_mention"]:
+                    if st.button(f"{meta['label']} ({count})", key=f"type_new_{t}"):
+                        st.session_state["alerts_f_type"] = t
+                        st.session_state.page = "alerts"
+                        st.rerun()
+        else:
+            st.caption("Aucune détection sur cette période")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"""
+    <div style="padding:12px 20px; border-bottom:1px solid {C['outline_variant']};">
+        <span style="font-size:14px; font-weight:700; color:{C['on_surface']};">Recent Detections</span>
+        <span style="font-size:10px; font-weight:400; color:{C['on_surface_variant']}; margin-left:8px;">
+            dernières détections enregistrées
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+    with h2:
+        if st.button("Voir tout →", key="voir_tout_detections_dash"):
+            st.session_state.page = "alerts"
+            st.rerun()
+
+    recent = df.sort_values("date_insertion_dt", ascending=False).head(8)
+    if recent.empty:
+        st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>Aucune détection récente.</p>",
+                     unsafe_allow_html=True)
+    else:
         rows = ""
         for _, r in recent.iterrows():
             meta = sev_meta(r["severity"])
-            date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["date_insertion_dt"]) else "—"
+            date_str = r["date_tri"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["date_tri"]) else "—"
             rows += f"""<tr>
-                <td style="color:{C['outline']}">{html.escape(date_str)}</td>
-                <td>{html.escape(str(r['type'] or ''))}</td>
-                <td>{html.escape(str(r['asset_concerne'] or ''))}</td>
-                <td style="color:{C['on_surface_variant']}">{html.escape(str(r['source_api'] or ''))}</td>
-                <td><span class="sev-badge" style="color:{meta['color']}">
-                    <span class="sev-dot" style="background:{meta['color']}"></span>{meta['label']}
-                </span></td>
+                <td style="color:{C['outline']}; font-size:10px; white-space:nowrap;">{html.escape(date_str)}</td>
+                <td><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:{meta['color']}; margin-right:4px;"></span><span style="font-size:11px;">{meta['label']}</span></td>
+                <td style="font-size:11px;">{html.escape(str(r['type'] or ''))}</td>
+                <td style="font-size:11px; color:{C['on_surface_variant']};">{html.escape(str(r['asset_concerne'] or '—'))}</td>
+                <td style="font-size:10px; color:{C['on_surface_variant']};">{html.escape(str(r['source_api'] or ''))}</td>
             </tr>"""
 
         st.markdown(f"""
-        <table class="aegis-table">
+        <table class="aegis-table" style="font-size:11px;">
             <thead><tr>
-                <th>Date/Heure</th><th>Type</th><th>Asset</th><th>Source</th><th>Sévérité</th>
+                <th>Date/Heure</th><th>Sévérité</th><th>Type</th><th>Asset</th><th>Source</th>
             </tr></thead>
             <tbody>{rows}</tbody>
         </table>
         """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
-    with col_live:
-        st.markdown('<div class="glass-card" style="border-left:2px solid rgba(239,68,68,0.5);">', unsafe_allow_html=True)
-        st.markdown(f"""<div class="card-title" style="display:flex;align-items:center;gap:8px;">
-            <span class="material-symbols-outlined" style="font-size:16px;color:#ef4444;">notifications_active</span>
-            Live Alerts
-        </div>""", unsafe_allow_html=True)
-
-        prioritaires = df[df["severity"].isin(["critique", "eleve"])].sort_values(
-            "date_insertion_dt", ascending=False).head(5)
-
-        if prioritaires.empty:
-            st.caption("Aucune alerte critique ou élevée en cours. 👍")
-        else:
-            cards = ""
-            for _, r in prioritaires.iterrows():
-                meta = sev_meta(r["severity"])
-                cards += f"""<div class="live-alert">
-                    <div class="live-alert-top">
-                        <span class="live-alert-sev" style="color:{meta['color']}">{meta['label'].upper()}</span>
-                        <span class="live-alert-time">{temps_relatif(r['date_insertion_dt'])}</span>
-                    </div>
-                    <div class="live-alert-text">{html.escape(str(r['details'] or '')[:140])}</div>
-                </div>"""
-            st.markdown(cards, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ============================================================
-# PAGE : DARK WEB MONITORING
-# ============================================================
-TYPE_META = {
-    "infostealer_compromise": {"label": "Infostealer Compromise", "icon": "password"},
-    "ransomware_leak": {"label": "Ransomware Leak", "icon": "lock_open"},
-    "credential_leak": {"label": "Credential Leak", "icon": "key"},
-    "domain_mention": {"label": "Domain Mention", "icon": "language"},
-    "malicious_infrastructure_mention": {"label": "Malicious Infrastructure Mention", "icon": "dns"},
-}
-
-
-def type_meta(t: str) -> dict:
-    if t in TYPE_META:
-        return TYPE_META[t]
-    return {"label": (t or "Inconnu").replace("_", " ").title(), "icon": "report"}
-
-
-LEAK_TYPES = ["infostealer_compromise", "credential_leak", "ransomware_leak"]
-
-TYPE_ACTIONS = {
-    "infostealer_compromise": [
-        "Forcer la réinitialisation des identifiants des machines/comptes infectés.",
-        "Révoquer les sessions actives et les tokens associés aux postes compromis.",
-    ],
-    "credential_leak": [
-        "Effectuer une rotation immédiate des identifiants exposés.",
-        "Activer la MFA sur tous les comptes concernés par la fuite.",
-    ],
-    "ransomware_leak": [
-        "Isoler les systèmes concernés et vérifier l'intégrité des sauvegardes.",
-        "Notifier les parties prenantes conformément au plan de réponse aux incidents.",
-    ],
-    "domain_mention": [
-        "Analyser le contexte de la mention pour évaluer la pertinence de la menace.",
-        "Surveiller les activités suspectes liées à ce domaine dans les prochains jours.",
-    ],
-}
-DEFAULT_ACTIONS = [
-    "Analyser le contenu de l'alerte pour qualifier le niveau de risque réel.",
-    "Escalader vers l'équipe SOC si la sévérité est confirmée.",
-]
-
-EXPOSED_FIELD_KEYWORDS = {
-    "password": "Mots de passe",
-    "mot de passe": "Mots de passe",
-    "email": "Adresses email",
-    "e-mail": "Adresses email",
-    "api key": "Clés API",
-    "api_key": "Clés API",
-    "credit card": "Cartes bancaires",
-    "carte bancaire": "Cartes bancaires",
-    "token": "Tokens",
-    "cookie": "Cookies",
-    "ip address": "Adresses IP",
-    "adresse ip": "Adresses IP",
-    "ssn": "Numéros d'identité",
-    "hash": "Empreintes / Hashs",
-    "username": "Identifiants",
-    "login": "Identifiants",
-}
-
-
-def extract_exposed_fields(details: str) -> list:
-    if not details:
-        return []
-    d = details.lower()
-    trouves = []
-    for kw, label in EXPOSED_FIELD_KEYWORDS.items():
-        if kw in d and label not in trouves:
-            trouves.append(label)
-    return trouves
-
-
-def get_recommended_actions(type_: str) -> list:
-    return TYPE_ACTIONS.get(type_, DEFAULT_ACTIONS)
-
-
-def page_darkweb():
-    df = charger_donnees()
-
-    h1, h2 = st.columns([3, 1])
-    with h1:
-        st.markdown(f"""
-        <h2 style="font-size:28px; font-weight:700; color:{C['on_surface']}; margin:0 0 4px 0;">
-            Dark Web Monitoring
-        </h2>
-        <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0;">
-            Surveillance continue via les flux CTI connectés — HudsonRock (infostealers) &amp; Ransomware.live.
-        </p>
-        """, unsafe_allow_html=True)
-    with h2:
-        st.markdown("""
-        <div style="display:flex; justify-content:flex-end; padding-top:8px;">
-            <span class="status-pill"><span class="live-dot"></span> MONITORING ACTIVE</span>
-        </div>
-        """, unsafe_allow_html=True)
-    st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:16px 0 20px 0;'>", unsafe_allow_html=True)
-
-    if df.empty:
-        st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour peupler ce flux.")
-        return
-
-    col_status, col_stream = st.columns([4, 8])
-
-    with col_status:
-        derniere = df["date_insertion_dt"].max() if df["date_insertion_dt"].notna().any() else None
-        sources_uniques = sorted(df["source_api"].dropna().unique().tolist())
-        assets_uniques = sorted(df["asset_recherche"].dropna().unique().tolist())
-
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Scan Integrity</div>', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="overview-row">
-            <span style="color:{C['on_surface_variant']}; font-size:12.5px; display:flex; align-items:center; gap:6px;">
-                <span class="material-symbols-outlined" style="font-size:15px;">history</span> Last Global Scan
-            </span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">
-                {html.escape(temps_relatif(derniere) if derniere is not None else '—')}
-            </span>
-        </div>
-        <div class="overview-row">
-            <span style="color:{C['on_surface_variant']}; font-size:12.5px; display:flex; align-items:center; gap:6px;">
-                <span class="material-symbols-outlined" style="font-size:15px;">update</span> Next Scheduled
-            </span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">Continu (2 min)</span>
-        </div>
-        <div style="border-top:1px solid {C['outline_variant']}; margin-top:12px; padding-top:12px;">
-            <p class="stat-label" style="margin-bottom:8px;">Sources Monitored</p>
-            <div>{''.join(f'<span class="tag-chip">{html.escape(s.upper())}</span>' for s in sources_uniques) or '<span style="color:'+C["outline"]+';font-size:12px;">Aucune</span>'}</div>
-            <p class="stat-label" style="margin:12px 0 8px 0;">Assets Monitored</p>
-            <div>{''.join(f'<span class="tag-chip">{html.escape(str(a))}</span>' for a in assets_uniques) or '<span style="color:'+C["outline"]+';font-size:12px;">Aucun</span>'}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.write("")
-
-        seuil_7j = datetime.now() - timedelta(days=7)
-        df_7j = df[df["date_insertion_dt"] >= seuil_7j]
-        rep_types = df_7j["type"].value_counts()
-
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Detection Overview (7j)</div>', unsafe_allow_html=True)
-        if rep_types.empty:
-            st.caption("Aucune détection sur les 7 derniers jours.")
-        else:
-            rows_html = ""
-            for t, count in rep_types.items():
-                meta = type_meta(t)
-                rows_html += f"""<div class="overview-row">
-                    <div style="display:flex; align-items:center; gap:10px;">
-                        <div class="overview-icon" style="background:rgba(56,189,248,0.10); border:1px solid {C['outline_variant']};">
-                            <span class="material-symbols-outlined" style="font-size:15px; color:{C['accent']};">{meta['icon']}</span>
-                        </div>
-                        <span style="font-size:12.5px; color:{C['on_surface']};">{html.escape(meta['label'])}</span>
-                    </div>
-                    <span style="font-family:monospace; font-weight:700; color:{C['on_surface']};">{count}</span>
-                </div>"""
-            st.markdown(rows_html, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col_stream:
-        st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div style="display:flex; justify-content:space-between; align-items:center;
-                    padding:16px 20px; border-bottom:1px solid {C['outline_variant']};">
-            <span style="font-size:15px; font-weight:700; color:{C['on_surface']}; display:flex; align-items:center; gap:8px;">
-                <span class="material-symbols-outlined" style="font-size:18px; color:{C['accent']};">rss_feed</span>
-                Live Detection Stream
-            </span>
-        </div>
-        """, unsafe_allow_html=True)
-
-        fc1, fc2, fc3 = st.columns([1, 1, 6])
-        with fc1:
-            with st.popover("FILTER", width="stretch"):
-                sel_sources = st.multiselect("Source", sources_uniques, default=sources_uniques, key="dw_sources")
-                sel_sev = st.multiselect("Sévérité", ["critique", "eleve", "faible"],
-                                          default=["critique", "eleve", "faible"], key="dw_sev")
-        with fc2:
-            df_filtre_export = df[df["source_api"].isin(st.session_state.get("dw_sources", sources_uniques)) &
-                                   df["severity"].isin(st.session_state.get("dw_sev", ["critique", "eleve", "faible"]))]
-            st.download_button("EXPORT", data=df_filtre_export.drop(columns=["date_insertion_dt"]).to_csv(index=False),
-                                file_name="detections.csv", mime="text/csv", width="stretch")
-
-        sel_sources_val = st.session_state.get("dw_sources", sources_uniques)
-        sel_sev_val = st.session_state.get("dw_sev", ["critique", "eleve", "faible"])
-        stream = df[df["source_api"].isin(sel_sources_val) & df["severity"].isin(sel_sev_val)]
-        stream = stream.sort_values("date_insertion_dt", ascending=False)
-
-        if stream.empty:
-            st.info("Aucune détection ne correspond à ce filtre.")
-        else:
-            items_html = '<div class="timeline-wrap"><div class="timeline-line"></div>'
-            for _, r in stream.iterrows():
-                sev = (r["severity"] or "").lower()
-                meta = sev_meta(sev)
-                badge_label = {"critique": "CRITICAL", "eleve": "WARNING", "faible": "INFO"}.get(sev, meta["label"].upper())
-                t_meta = type_meta(r["type"])
-                date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M UTC") if pd.notna(r["date_insertion_dt"]) else "—"
-                opacity = "opacity:0.75;" if sev == "faible" else ""
-                glow = f"box-shadow:0 0 8px {meta['color']}66;" if sev in ("critique", "eleve") else ""
-
-                meta_line = f"""<span style="display:flex; align-items:center; gap:4px;">
-                        <span class="material-symbols-outlined" style="font-size:13px;">public</span>
-                        Source: {html.escape(str(r['source_api'] or ''))}
-                    </span>"""
-                if r.get("asset_concerne"):
-                    meta_line += f"""<span style="display:flex; align-items:center; gap:4px;">
-                        <span class="material-symbols-outlined" style="font-size:13px;">tag</span>
-                        {html.escape(str(r['asset_concerne']))}
-                    </span>"""
-
-                items_html += f"""
-                <div class="timeline-item" style="{opacity}">
-                    <div class="timeline-dot-wrap" style="border:1px solid {meta['color']};">
-                        <span class="timeline-dot" style="background:{meta['color']}; {glow}"></span>
-                    </div>
-                    <div class="timeline-card" style="border:1px solid {meta['color']}33;">
-                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
-                            <div style="display:flex; align-items:center; gap:8px;">
-                                <span class="timeline-badge" style="background:{meta['bg']}; color:{meta['color']}; border:1px solid {meta['color']}4d;">{badge_label}</span>
-                                <h4 style="font-family:monospace; font-size:13px; color:{C['on_surface']}; margin:0;">{html.escape(t_meta['label'])}</h4>
-                            </div>
-                            <span style="font-family:monospace; font-size:11px; color:{C['on_surface_variant']};">{html.escape(date_str)}</span>
-                        </div>
-                        <p style="font-size:12.5px; color:{C['on_surface_variant']}; margin:0 0 8px 0; line-height:1.4;">
-                            {html.escape(str(r['details'] or ''))}
-                        </p>
-                        <div class="timeline-meta">{meta_line}</div>
-                    </div>
-                </div>"""
-            items_html += "</div>"
-
-            st.markdown(f'<div style="max-height:560px; overflow-y:auto; padding:4px 20px 20px 20px;">{items_html}</div>',
-                         unsafe_allow_html=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # PAGE : ASSETS
 # ============================================================
 def page_assets():
     df = charger_donnees()
-
-    h1, h2 = st.columns([3, 1])
-    with h1:
+    assets_surveilles = charger_assets()
+    
+    st.markdown(f"""
+    <style>
+    .btn-add-asset {{
+        background: linear-gradient(135deg, {C['accent']} 0%, #7c3aed 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 8px 16px !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+        width: 100% !important;
+        cursor: pointer !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 15px rgba(56, 189, 248, 0.3) !important;
+    }}
+    .btn-add-asset:hover {{
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 25px rgba(56, 189, 248, 0.5) !important;
+    }}
+    .form-label-custom {{
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: {C['on_surface_variant']};
+        margin-bottom: 4px;
+    }}
+    .form-hint-custom {{
+        font-size: 12px;
+        color: {C['outline']};
+        margin-top: 2px;
+    }}
+    .form-error-custom {{
+        font-size: 12px;
+        color: #ef4444;
+        margin-top: 4px;
+        padding: 4px 8px;
+        background: rgba(239, 68, 68, 0.1);
+        border-radius: 4px;
+        border-left: 3px solid #ef4444;
+    }}
+    .form-success-custom {{
+        font-size: 12px;
+        color: #10b981;
+        margin-top: 4px;
+        padding: 4px 8px;
+        background: rgba(16, 185, 129, 0.1);
+        border-radius: 4px;
+        border-left: 3px solid #10b981;
+    }}
+    .asset-count-custom {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        background: {C['surface_highest']};
+        border-radius: 20px;
+        font-size: 12px;
+        color: {C['on_surface_variant']};
+    }}
+    div[data-testid="stDialog"] > div {{
+        max-width: 600px !important;
+        width: 90% !important;
+        margin: auto !important;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+    
+    col_header, col_search, col_add = st.columns([2, 1.5, 0.8])
+    
+    with col_header:
         st.markdown(f"""
         <h2 style="font-size:28px; font-weight:700; color:{C['on_surface']}; margin:0 0 4px 0;">
             Monitored Assets
         </h2>
         <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0;">
-            Empreinte numérique surveillée par le pipeline CTI (assets réellement recherchés dans main.py).
+            Tous les assets surveillés par le pipeline CTI 
+            <span style="color:{C['accent']}; font-weight:600;">({len(assets_surveilles)} actifs)</span>
         </p>
         """, unsafe_allow_html=True)
-    with h2:
-        recherche = st.text_input("Rechercher un asset", placeholder="🔎 Rechercher un asset...",
-                                   label_visibility="collapsed", key="assets_search")
+    
+    with col_search:
+        recherche = st.text_input(
+            "Rechercher un asset", 
+            placeholder="🔎 Rechercher un asset...", 
+            label_visibility="collapsed", 
+            key="assets_search"
+        )
+    
+    with col_add:
+        if st.button("➕ Ajouter un asset", key="btn_open_add_asset_unique", use_container_width=True):
+            st.session_state.show_add_asset_dialog = True
+            st.rerun()
+        
+        if st.session_state.get("show_add_asset_dialog", False):
+            @st.dialog("➕ Ajouter un nouvel asset", width="small")
+            def add_asset_dialog():
+                if "asset_error" not in st.session_state:
+                    st.session_state.asset_error = ""
+                if "asset_success" not in st.session_state:
+                    st.session_state.asset_success = ""
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown('<span class="form-label-custom">Type d\'asset *</span>', unsafe_allow_html=True)
+                    new_asset_type = st.selectbox(
+                        "Type",
+                        ["Domaine", "Adresse IP", "Email", "Mot-clé"],
+                        key="new_asset_type_dialog",
+                        label_visibility="collapsed"
+                    )
+                    
+                    st.markdown('<span class="form-label-custom">Valeur de l\'asset *</span>', unsafe_allow_html=True)
+                    new_asset_value = st.text_input(
+                        "Valeur",
+                        placeholder="ex: entreprise.tn, 192.168.1.1",
+                        key="new_asset_value_dialog",
+                        label_visibility="collapsed"
+                    )
+                
+                with col2:
+                    st.markdown('<span class="form-label-custom">Catégorie *</span>', unsafe_allow_html=True)
+                    category_options = ["Critique", "Élevée", "Moyenne", "Faible"]
+                    new_asset_category = st.selectbox(
+                        "Catégorie",
+                        category_options,
+                        index=3,
+                        key="new_asset_category_dialog",
+                        label_visibility="collapsed"
+                    )
+                    
+                    examples = {
+                        "Domaine": "💡 ex: entreprise.tn, google.com",
+                        "Adresse IP": "💡 ex: 192.168.1.1, 10.0.0.1",
+                        "Email": "💡 ex: contact@entreprise.tn",
+                        "Mot-clé": "💡 ex: ransomware, phishing"
+                    }
+                    st.markdown(f'<div class="form-hint-custom">{examples.get(new_asset_type, "")}</div>', unsafe_allow_html=True)
+                
+                if st.session_state.asset_error:
+                    st.markdown(f'<div class="form-error-custom">⚠️ {st.session_state.asset_error}</div>', unsafe_allow_html=True)
+                if st.session_state.asset_success:
+                    st.markdown(f'<div class="form-success-custom">✅ {st.session_state.asset_success}</div>', unsafe_allow_html=True)
+                
+                current_assets_count = len(assets_surveilles)
+                st.markdown(f"""
+                <div style="display:flex; justify-content:flex-end; margin: 8px 0;">
+                    <span class="asset-count-custom">📌 {current_assets_count} asset(s) déjà surveillé(s)</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                col_actions1, col_actions2 = st.columns([1, 2])
+                
+                with col_actions1:
+                    if st.button("Annuler", key="cancel_asset_dialog", use_container_width=True):
+                        st.session_state.asset_error = ""
+                        st.session_state.asset_success = ""
+                        st.session_state.show_add_asset_dialog = False
+                        st.rerun()
+                
+                with col_actions2:
+                    if st.button("Ajouter l'asset", key="save_asset_dialog", use_container_width=True):
+                        st.session_state.asset_error = ""
+                        st.session_state.asset_success = ""
+                        
+                        if not new_asset_value.strip():
+                            st.session_state.asset_error = "Veuillez saisir une valeur pour l'asset."
+                            st.rerun()
+                        else:
+                            import re
+                            value = new_asset_value.strip()
+                            is_valid = True
+                            error_msg = ""
+                            
+                            if new_asset_type == "Domaine":
+                                domain_pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$'
+                                if not re.match(domain_pattern, value):
+                                    is_valid = False
+                                    error_msg = "Format de domaine invalide. Exemple: entreprise.tn"
+                            
+                            elif new_asset_type == "Adresse IP":
+                                ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+                                if not re.match(ip_pattern, value):
+                                    is_valid = False
+                                    error_msg = "Format d'adresse IP invalide. Exemple: 192.168.1.1"
+                                else:
+                                    octets = value.split('.')
+                                    for octet in octets:
+                                        if not (0 <= int(octet) <= 255):
+                                            is_valid = False
+                                            error_msg = "Octet d'adresse IP invalide (doit être entre 0 et 255)"
+                                            break
+                            
+                            elif new_asset_type == "Email":
+                                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                                if not re.match(email_pattern, value):
+                                    is_valid = False
+                                    error_msg = "Format d'email invalide. Exemple: contact@entreprise.tn"
+                            
+                            else:
+                                if len(value) < 2:
+                                    is_valid = False
+                                    error_msg = "Le mot-clé doit contenir au moins 2 caractères"
+                                elif re.search(r'[<>"\'/]', value):
+                                    is_valid = False
+                                    error_msg = "Le mot-clé contient des caractères invalides"
+                            
+                            if not is_valid:
+                                st.session_state.asset_error = error_msg
+                                st.rerun()
+                            else:
+                                exists = any(
+                                    a["identifier"].lower() == value.lower() 
+                                    for a in assets_surveilles
+                                )
+                                
+                                if exists:
+                                    st.session_state.asset_error = f"L'asset '{value}' existe déjà."
+                                    st.rerun()
+                                else:
+                                    type_map = {
+                                        "Domaine": "Domaine",
+                                        "Adresse IP": "Adresse IP",
+                                        "Email": "Email",
+                                        "Mot-clé": "Mot-clé"
+                                    }
+                                    mapped_type = type_map.get(new_asset_type, "Mot-clé")
+                                    
+                                    if ajouter_asset_avec_sync(value, mapped_type):
+                                        st.session_state.asset_success = f"Asset '{value}' ajouté avec succès !"
+                                        time.sleep(0.5)
+                                        st.session_state.show_add_asset_dialog = False
+                                        st.rerun()
+                                    else:
+                                        st.session_state.asset_error = f"Erreur lors de l'ajout de l'asset."
+                                        st.rerun()
+            
+            add_asset_dialog()
+    
     st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:16px 0 20px 0;'>", unsafe_allow_html=True)
 
-    if df.empty:
-        st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour peupler cette vue.")
+    if df.empty and not assets_surveilles:
+        st.info("No alerts in database and no assets monitored. Use the button above to add assets to monitor.")
         return
 
     agg_rows = []
-    for asset, groupe in df.groupby("asset_recherche"):
-        pire_sev = max(groupe["severity"].dropna(), key=lambda s: SEVERITY_RANK.get(s, 0), default="faible")
-        derniere = groupe["date_insertion_dt"].max()
-        agg_rows.append({
-            "asset": asset,
-            "type": classify_asset_type(asset),
-            "findings": len(groupe),
-            "severity": pire_sev,
-            "derniere": derniere,
-        })
+    
+    if not df.empty:
+        for asset, groupe in df.groupby("asset_recherche"):
+            pire_sev = max(
+                groupe["severity"].dropna(), 
+                key=lambda s: SEVERITY_RANK.get(s, 0), 
+                default="faible"
+            )
+            derniere = groupe["date_insertion_dt"].max()
+            agg_rows.append({
+                "asset": asset,
+                "type": classify_asset_type(asset),
+                "findings": len(groupe),
+                "severity": pire_sev,
+                "derniere": derniere,
+                "description": "",
+                "is_monitored": any(a["identifier"] == asset for a in assets_surveilles)
+            })
+    
+    for asset_surveille in assets_surveilles:
+        if not any(row["asset"] == asset_surveille["identifier"] for row in agg_rows):
+            agg_rows.append({
+                "asset": asset_surveille["identifier"],
+                "type": asset_surveille.get("type", classify_asset_type(asset_surveille["identifier"])),
+                "findings": 0,
+                "severity": "faible",
+                "derniere": None,
+                "description": asset_surveille.get("description", ""),
+                "is_monitored": True
+            })
+    
+    if not agg_rows:
+        st.info("No assets to display. Use the button above to add assets to monitor.")
+        return
+    
     assets_df = pd.DataFrame(agg_rows)
+    
     if recherche:
         assets_df = assets_df[assets_df["asset"].str.contains(recherche, case=False, na=False)]
     assets_df = assets_df.sort_values("findings", ascending=False)
 
     total_assets = len(assets_df)
     critique_assets = int((assets_df["severity"] == "critique").sum())
-    total_detections = len(df)
-    seuil_7j = datetime.now() - timedelta(days=7)
-    detections_7j = int((df["date_insertion_dt"] >= seuil_7j).sum())
+    elevee_assets = int((assets_df["severity"] == "eleve").sum())
+    moyenne_assets = int((assets_df["severity"] == "moyenne").sum())
+    faible_assets = int((assets_df["severity"] == "faible").sum())
+    total_detections = len(df) if not df.empty else 0
+    monitored_count = len([a for a in assets_surveilles if any(row["asset"] == a["identifier"] for row in agg_rows)])
 
     stats = [
         ("Total Assets", str(total_assets), "hub", C["accent"]),
-        ("Risque Critique", str(critique_assets), "warning", "#ef4444"),
-        ("Total Détections", str(total_detections), "monitor_heart", "#f59e0b"),
-        ("Détections (7j)", str(detections_7j), "radar", "#10b981"),
+        ("Monitored", str(monitored_count), "check_circle", "#10b981"),
+        ("Critique", str(critique_assets), "warning", "#ef4444"),
+        ("Élevée", str(elevee_assets), "trending_up", "#f59e0b"),
+        ("Moyenne", str(moyenne_assets), "remove", "#fbbf24"),
+        ("Faible", str(faible_assets), "info", "#10b981"),
     ]
-    cols = st.columns(4)
+    cols = st.columns(6)
     for col, (label, value, icon, color) in zip(cols, stats):
         with col:
             st.markdown(f"""
@@ -1158,66 +1579,106 @@ def page_assets():
                     <span class="stat-label">{html.escape(label)}</span>
                     <span class="material-symbols-outlined" style="font-size:16px; color:{color};">{icon}</span>
                 </div>
-                <div class="stat-value" style="color:{color if label=='Risque Critique' else C['on_surface']};">{html.escape(value)}</div>
+                <div class="stat-value" style="color:{color if label in ['Critique', 'Élevée'] else C['on_surface']};">{html.escape(value)}</div>
             </div>
             """, unsafe_allow_html=True)
 
     st.write("")
+    
     st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
 
     page_df, page, total_pages, debut, fin, total = paginer(assets_df, "assets_page", taille_page=10)
 
     st.markdown(f"""
-    <div class="data-toolbar">
-        <span style="font-size:13px; font-weight:700; color:{C['on_surface']};">Assets surveillés</span>
-        <span class="pagination-info">Affichage {debut}-{fin} sur {total}</span>
+    <div class="data-toolbar" style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid {C['outline_variant']};">
+        <span style="font-size:13px; font-weight:700; color:{C['on_surface']};">Assets List ({len(assets_df)})</span>
+        <span class="pagination-info">Showing {debut}-{fin} of {total}</span>
     </div>
     """, unsafe_allow_html=True)
 
     if page_df.empty:
-        st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>Aucun asset ne correspond à ta recherche.</p>",
+        st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>No assets match your search.</p>",
                      unsafe_allow_html=True)
     else:
-        rows = ""
-        for _, r in page_df.iterrows():
+        headers = ["Asset", "Type", "Status", "Last Detection", "Findings", "Risk", "Action"]
+        header_cols = st.columns([2.2, 1.1, 0.9, 1.1, 0.7, 0.9, 0.6])
+        
+        for col, header in zip(header_cols, headers):
+            col.markdown(f"<span class='stat-label'>{header}</span>", unsafe_allow_html=True)
+        
+        st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+        
+        for idx, r in page_df.iterrows():
             meta = sev_meta(r["severity"])
-            derniere_str = temps_relatif(r["derniere"]) if pd.notna(r["derniere"]) else "—"
+            derniere_str = temps_relatif(r["derniere"]) if pd.notna(r["derniere"]) else "Never"
             icon = ASSET_TYPE_ICON.get(r["type"], "sell")
             findings_style = f"font-weight:700; color:{meta['color']};" if r["findings"] > 0 else ""
-            rows += f"""<tr>
-                <td>
-                    <div class="asset-name-cell">
-                        <span class="asset-dot" style="background:{meta['color']};"></span>
-                        {html.escape(str(r['asset']))}
-                    </div>
-                </td>
-                <td style="color:{C['on_surface_variant']};">
-                    <span class="material-symbols-outlined" style="font-size:13px; vertical-align:middle; margin-right:4px;">{icon}</span>
-                    {html.escape(r['type'])}
-                </td>
-                <td>{badge_pill('ACTIF', '#10b981', 'rgba(16,185,129,0.14)')}</td>
-                <td style="color:{C['on_surface_variant']};">{html.escape(derniere_str)}</td>
-                <td style="text-align:center; {findings_style}">{r['findings']}</td>
-                <td>{badge_pill(meta['label'].upper(), meta['color'], meta['bg'])}</td>
-            </tr>"""
-
-        st.markdown(f"""
-        <table class="aegis-table">
-            <thead><tr>
-                <th>Asset</th><th>Type</th><th>Statut</th><th>Dernière détection</th>
-                <th style="text-align:center;">Findings</th><th>Risque</th>
-            </tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-        """, unsafe_allow_html=True)
+            
+            is_monitored = r.get("is_monitored", False)
+            status_color = "#10b981" if is_monitored else "#64748b"
+            status_text = "Active" if is_monitored else "Inactive"
+            
+            row_cols = st.columns([2.2, 1.1, 0.9, 1.1, 0.7, 0.9, 0.6])
+            
+            row_cols[0].markdown(f"""
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span class="asset-dot" style="background:{meta['color']}; display:inline-block; width:10px; height:10px; border-radius:50%;"></span>
+                <span style="font-weight:600; color:{C['on_surface']};">{html.escape(str(r['asset']))}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            row_cols[1].markdown(f"""
+            <span style="color:{C['on_surface_variant']};">
+                <span class="material-symbols-outlined" style="font-size:13px; vertical-align:middle; margin-right:4px;">{icon}</span>
+                {html.escape(r['type'])}
+            </span>
+            """, unsafe_allow_html=True)
+            
+            row_cols[2].markdown(badge_pill(status_text, status_color, f'rgba({int(status_color[1:3],16)},{int(status_color[3:5],16)},{int(status_color[5:7],16)},0.14)'), unsafe_allow_html=True)
+            
+            row_cols[3].markdown(f"<span style='color:{C['on_surface_variant']};'>{html.escape(derniere_str)}</span>", unsafe_allow_html=True)
+            
+            row_cols[4].markdown(f"<span style='text-align:center; {findings_style}'>{r['findings']}</span>", unsafe_allow_html=True)
+            
+            row_cols[5].markdown(badge_pill(meta['label'].upper(), meta['color'], meta['bg']), unsafe_allow_html=True)
+            
+            if is_monitored:
+                delete_key = f"delete_asset_{r['asset']}_{idx}"
+                with row_cols[6]:
+                    with st.popover("🗑️", use_container_width=True):
+                        st.markdown(f"""
+                        <div style="text-align:center; padding: 4px 0;">
+                            <p style="font-size: 14px; font-weight: 600; margin-bottom: 4px; color:{C['on_surface']};">
+                                Supprimer <span style="color: {C['accent']};">{html.escape(str(r['asset']))}</span> ?
+                            </p>
+                            <p style="font-size: 12px; color: {C['outline']}; margin-bottom: 12px;">
+                                ⚠️ Action irréversible
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.button("Annuler", key=f"cancel_{delete_key}", use_container_width=True)
+                        
+                        with col2:
+                            if st.button("Supprimer", key=f"confirm_{delete_key}", use_container_width=True, type="primary"):
+                                if supprimer_asset_avec_sync(r['asset']):
+                                    st.success(f"✅ Asset '{r['asset']}' supprimé !")
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Erreur lors de la suppression.")
+            else:
+                row_cols[6].markdown("—")
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.write("")
     controles_pagination("assets_page", page, total_pages, "assets")
 
-
 # ============================================================
-# PAGE : ALERTS
+# PAGE : ALERTS (TRI PAR DATE DE DÉTECTION - CORRIGÉ V3)
 # ============================================================
 def page_alerts():
     if st.session_state.get("alert_detail_id") is not None:
@@ -1245,42 +1706,81 @@ def page_alerts():
         st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour peupler ce flux.")
         return
 
+    # ===== FILTRES =====
     f1, f2, f3, f4 = st.columns(4)
+
     with f1:
-        niveaux = st.selectbox("Niveau de risque", ["Tous"] + sorted(df["severity"].dropna().unique().tolist()),
-                                key="alerts_f_sev")
+        niveaux_options = ["Tous", "Critique", "Élevée", "Moyenne", "Faible"]
+        niveaux_label = st.selectbox("Niveau de risque", niveaux_options, key="alerts_f_sev")
+        severity_map = {
+            "Tous": None,
+            "Critique": "critique",
+            "Élevée": "eleve",
+            "Moyenne": "moyenne",
+            "Faible": "faible"
+        }
+        niveaux = severity_map[niveaux_label]
+
     with f2:
         types_dispo = sorted(df["type"].dropna().unique().tolist())
         types_sel = st.selectbox("Type de détection", ["Tous"] + types_dispo, key="alerts_f_type")
+
     with f3:
         periode = st.selectbox("Période", ["Tout", "Dernières 24h", "7 derniers jours", "30 derniers jours"],
                                 key="alerts_f_periode")
-    with f4:
-        sources_sel = st.selectbox("Source", ["Toutes"] + sorted(df["source_api"].dropna().unique().tolist()),
-                                    key="alerts_f_source")
 
+    with f4:
+        source_labels = ["Toutes"] + [s["label"] for s in SOURCES_DETECTION]
+        sources_sel_label = st.selectbox("Source", source_labels, key="alerts_f_source")
+        source_map = {s["label"]: s["id"] for s in SOURCES_DETECTION}
+        source_filter_value = source_map.get(sources_sel_label)
+
+    # ===== APPLICATION DES FILTRES =====
     filtre = df.copy()
-    if niveaux != "Tous":
+
+    if niveaux is not None:
         filtre = filtre[filtre["severity"] == niveaux]
+
     if types_sel != "Tous":
         filtre = filtre[filtre["type"] == types_sel]
-    if sources_sel != "Toutes":
-        filtre = filtre[filtre["source_api"] == sources_sel]
+
+    if sources_sel_label != "Toutes" and source_filter_value:
+        filtre = filtre[filtre["source_api"] == source_filter_value]
+
     if periode != "Tout":
         heures = {"Dernières 24h": 24, "7 derniers jours": 24 * 7, "30 derniers jours": 24 * 30}[periode]
         filtre = filtre[filtre["date_insertion_dt"] >= datetime.now() - timedelta(hours=heures)]
+
     if recherche:
         masque = (filtre["id"].astype(str).str.contains(recherche, case=False, na=False) |
                   filtre["asset_concerne"].astype(str).str.contains(recherche, case=False, na=False) |
                   filtre["source_api"].astype(str).str.contains(recherche, case=False, na=False))
         filtre = filtre[masque]
 
-    filtre = filtre.sort_values("date_insertion_dt", ascending=False)
+    # ===== TRI PAR DATE DE PREMIÈRE DÉTECTION (la plus récente en premier) =====
+    def to_naive_datetime(col):
+        """Convertit une colonne en datetime naive (sans fuseau horaire)"""
+        dt = pd.to_datetime(col, errors="coerce", utc=True)
+        if hasattr(dt, 'dt') and dt.dt.tz is not None:
+            dt = dt.dt.tz_localize(None)
+        return dt
 
+    if "date_detection" in filtre.columns:
+        filtre["date_detection_dt"] = to_naive_datetime(filtre["date_detection"])
+    else:
+        filtre["date_detection_dt"] = pd.NaT
+
+    # Tri uniquement sur la date de première détection ; les alertes sans cette date
+    # (NaT) sont reléguées en fin de liste plutôt que de fausser l'ordre avec la date d'insertion.
+    filtre = filtre.sort_values("date_detection_dt", ascending=False, na_position="last")
+
+    # ===== EXPORT =====
     st.write("")
-    st.download_button("⬇ Export CSV", data=filtre.drop(columns=["date_insertion_dt"]).to_csv(index=False),
+    export_df = filtre.drop(columns=["date_detection_dt"], errors="ignore")
+    st.download_button("⬇ Export CSV", data=export_df.to_csv(index=False),
                         file_name="alertes_export.csv", mime="text/csv")
 
+    # ===== TABLEAU DES ALERTES =====
     st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
     page_df, page, total_pages, debut, fin, total = paginer(filtre, "alerts_page", taille_page=12)
 
@@ -1296,7 +1796,7 @@ def page_alerts():
                      unsafe_allow_html=True)
     else:
         header_cols = st.columns([1.2, 1, 1.6, 1.6, 1.2, 1.6, 0.8])
-        headers = ["Alert ID", "Risque", "Type", "Asset concerné", "Source", "Heure", ""]
+        headers = ["Alert ID", "Risque", "Type", "Asset concerné", "Source", "Détection", ""]
         for c, h in zip(header_cols, headers):
             c.markdown(f"<span class='stat-label'>{h}</span>", unsafe_allow_html=True)
         st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 4px 0;'>", unsafe_allow_html=True)
@@ -1304,7 +1804,15 @@ def page_alerts():
         for _, r in page_df.iterrows():
             meta = sev_meta(r["severity"])
             t_meta = type_meta(r["type"])
-            date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["date_insertion_dt"]) else "—"
+
+            # Afficher la date de détection (ou date d'insertion si non disponible)
+            if pd.notna(r.get("date_detection_dt")):
+                date_str = r["date_detection_dt"].strftime("%Y-%m-%d %H:%M")
+            elif pd.notna(r.get("date_insertion_dt")):
+                date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M")
+            else:
+                date_str = "—"
+
             row_cols = st.columns([1.2, 1, 1.6, 1.6, 1.2, 1.6, 0.8])
             row_cols[0].markdown(f"<span style='font-family:monospace; color:{C['accent']}; font-size:12.5px;'>"
                                   f"ALRT-{int(r['id']):04d}</span>", unsafe_allow_html=True)
@@ -1325,7 +1833,9 @@ def page_alerts():
     st.write("")
     controles_pagination("alerts_page", page, total_pages, "alerts")
 
-
+# ============================================================
+# PAGE : ALERT DETAIL (version finale - sans warnings)
+# ============================================================
 def page_alert_detail(alert_id):
     df = charger_donnees()
     ligne = df[df["id"] == alert_id]
@@ -1335,550 +1845,1058 @@ def page_alert_detail(alert_id):
             st.session_state["alert_detail_id"] = None
             st.rerun()
         return
+
     r = ligne.iloc[0]
     meta = sev_meta(r["severity"])
     t_meta = type_meta(r["type"])
 
-    if st.button("← Retour aux alertes", key="back_to_alerts"):
-        st.session_state["alert_detail_id"] = None
-        st.rerun()
+    infos_specifiques = extraire_infos_specifiques_alerte(r["type"], r["details"])
 
+    date_detection = str(r["date_detection"]) if r["date_detection"] else "Non disponible"
+    date_insertion = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M:%S UTC") if pd.notna(r["date_insertion_dt"]) else "Non disponible"
+    asset = str(r["asset_concerne"] or "Non spécifié")
+    asset_type = classify_asset_type(asset)
+
+    details_text = str(r["details"] or "Aucun détail disponible.")
+
+    # ID stable
+    aid = int(r["id"])
+
+    # --- Statut : initialisé AVANT l'en-tête ---
+    status_key = f"status_alert_{aid}"
+    if status_key not in st.session_state:
+        st.session_state[status_key] = "Nouveau"
+    current_status = st.session_state[status_key]
+    status_meta = STATUS_META[current_status]
+
+    if r["type"] in ["ransomware_leak", "ransomware_leak_tn", "ransomware_leak_pays"]:
+        groupe = infos_specifiques.get("groupe", "Non spécifié")
+        entreprise = infos_specifiques.get("entreprise", "Non spécifiée")
+        description_groupe = f"Groupe {groupe} · Entreprise {entreprise}"
+    elif r["type"] == "infostealer_compromise":
+        total = infos_specifiques.get("total", "0")
+        description_groupe = f"{total} comptes compromis"
+    elif r["type"] == "infostealer_email_check":
+        ordinateur = infos_specifiques.get("ordinateur", "Inconnu")
+        description_groupe = f"Email {asset} · Appareil: {ordinateur}"
+    elif r["type"] == "credential_leak":
+        description_groupe = f"Identifiants de {asset} exposés"
+    elif r["type"] == "domain_mention":
+        description_groupe = f"Domaine {asset} mentionné"
+    elif r["type"] == "apt_mention":
+        description_groupe = f"Rapport APT mentionnant {asset}"
+    elif r["type"] == "deepdarkcti_status":
+        description_groupe = "Statut des sites de fuite ransomware"
+    elif r["type"] == "ransomware_global_feed":
+        description_groupe = f"Victime: {asset}"
+    else:
+        description_groupe = t_meta['label']
+
+    severity_colors = {
+        "critique": {"bg": "rgba(239,68,68,0.12)", "color": "#ef4444"},
+        "eleve": {"bg": "rgba(245,165,36,0.12)", "color": "#f5a524"},
+        "moyenne": {"bg": "rgba(251,191,36,0.12)", "color": "#fbbf24"},
+        "faible": {"bg": "rgba(34,197,94,0.12)", "color": "#22c55e"},
+    }
+    sev_color = severity_colors.get(r["severity"], {"bg": "rgba(107,117,144,0.12)", "color": "#6b7590"})
+
+    # === BOUTON RETOUR ===
+    col_back, _ = st.columns([1, 4])
+    with col_back:
+        if st.button("← Retour aux alertes", key="back_to_alerts"):
+            st.session_state["alert_detail_id"] = None
+            st.rerun()
+
+    # === EN-TÊTE ===
     st.markdown(f"""
-    <div style="display:flex; align-items:center; gap:10px; margin:12px 0 6px 0;">
-        {badge_pill(meta['label'].upper() + ' RISK', meta['color'], meta['bg'])}
-        <span style="font-family:monospace; color:{C['outline']}; font-size:12px;">ALRT-{int(r['id']):04d}</span>
+    <div style="display:flex; align-items:center; gap:12px; margin-top:16px; flex-wrap:wrap;">
+        <span style="background:{sev_color['bg']}; color:{sev_color['color']}; font-size:11px; font-weight:700; letter-spacing:0.06em; padding:5px 10px; border-radius:5px; text-transform:uppercase;">
+            {meta['label'].upper()}
+        </span>
+        <span style="background:{status_meta['bg']}; color:{status_meta['color']}; font-size:11px; font-weight:700; letter-spacing:0.06em; padding:5px 10px; border-radius:5px; text-transform:uppercase;">
+            {status_meta['dot']} {current_status}
+        </span>
+        <span style="color:#6b7590; font-family:monospace; font-size:13px;">ALRT-{int(r['id']):04d}</span>
+        <span style="color:#6b7590; font-family:monospace; font-size:12px; background:#161d30; padding:3px 10px; border-radius:4px;">
+            {html.escape(str(r['source_api'] or 'Inconnu'))}
+        </span>
     </div>
-    <h2 style="font-size:26px; font-weight:700; color:{C['on_surface']}; margin:4px 0 10px 0;">
+    <h1 style="font-size:30px; font-weight:700; color:#eef1f8; margin:12px 0 4px 0; letter-spacing:-0.01em;">
         {html.escape(t_meta['label'])}
-    </h2>
-    <p style="color:{C['on_surface_variant']}; font-size:14px; max-width:800px; line-height:1.5; margin-bottom:24px;">
-        {html.escape(str(r['details'] or ''))}
-    </p>
+    </h1>
+    <div style="color:#9aa4bd; font-size:14px; margin-bottom:24px;">
+        {html.escape(description_groupe)}
+    </div>
     """, unsafe_allow_html=True)
 
-    col_a, col_b = st.columns(2)
-    date_detection_str = str(r["date_detection"]) if r["date_detection"] else "—"
-    date_insertion_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M:%S UTC") if pd.notna(r["date_insertion_dt"]) else "—"
+    # === RÉSUMÉ ===
+    st.markdown(f"""
+    <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:24px;">
+        <div style="font-size:14px; line-height:1.6; color:#9aa4bd;">
+            {html.escape(details_text)}
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px;">
+            <span style="background:#161d30; border:1px solid #1c2436; color:#9aa4bd; font-size:11px; padding:4px 10px; border-radius:4px;">{html.escape(r['type'])}</span>
+            <span style="background:#161d30; border:1px solid #1c2436; color:#9aa4bd; font-size:11px; padding:4px 10px; border-radius:4px;">{html.escape(str(r['source_api'] or ''))}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with col_a:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Detection Timeline</div>', unsafe_allow_html=True)
+    # === GRILLE 2 COLONNES ===
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # --- VICTIME ---
         st.markdown(f"""
-        <div class="overview-row"><span style="color:{C['on_surface_variant']}; font-size:12.5px;">First Seen (source)</span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(date_detection_str)}</span></div>
-        <div class="overview-row"><span style="color:{C['on_surface_variant']}; font-size:12.5px;">Added to DB</span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(date_insertion_str)}</span></div>
+        <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+            <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                Victime
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Asset</span>
+                <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset)}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Type</span>
+                <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset_type)}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Secteur</span>
+                <span style="font-family:monospace; color:#eef1f8;">{html.escape(str(r['sector'] or 'Non disponible'))}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Pays</span>
+                <span style="font-family:monospace; color:#eef1f8;">{html.escape(str(r['country'] or 'Non disponible'))}</span>
+            </div>
+        </div>
         """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
-    with col_b:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Source Intel</div>', unsafe_allow_html=True)
+        # --- CHRONOLOGIE ---
         st.markdown(f"""
-        <div class="overview-row"><span style="color:{C['on_surface_variant']}; font-size:12.5px;">Source</span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(str(r['source_api'] or '—'))}</span></div>
-        <div class="overview-row"><span style="color:{C['on_surface_variant']}; font-size:12.5px;">Terme surveillé</span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(str(r['asset_recherche'] or '—'))}</span></div>
-        <div class="overview-row"><span style="color:{C['on_surface_variant']}; font-size:12.5px;">Élément concerné</span>
-            <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(str(r['asset_concerne'] or '—'))}</span></div>
+        <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+            <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 14px 0; font-weight:700;">
+                Chronologie
+            </div>
+            <div style="display:flex; flex-direction:column; gap:4px;">
+                <div style="display:flex; align-items:baseline; gap:12px; padding:6px 0; border-bottom:1px solid #1c2436;">
+                    <span style="font-family:monospace; font-size:12px; color:#6b7590;">{html.escape(date_detection)}</span>
+                    <span style="font-size:13px; color:#eef1f8;">Première détection</span>
+                    <span style="margin-left:auto; font-size:11px; color:#22c55e;">✓</span>
+                </div>
+                <div style="display:flex; align-items:baseline; gap:12px; padding:6px 0;">
+                    <span style="font-family:monospace; font-size:12px; color:#6b7590;">{html.escape(date_insertion)}</span>
+                    <span style="font-size:13px; color:#eef1f8;">Ajout à la base</span>
+                    <span style="margin-left:auto; font-size:11px; color:#22c55e;">✓</span>
+                </div>
+            </div>
+        </div>
         """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
+    with col2:
+        # --- INFORMATIONS SPÉCIFIQUES ---
+        if r["type"] == "infostealer_compromise":
+            total = infos_specifiques.get("total", "0")
+            employes = infos_specifiques.get("employes", "0")
+            utilisateurs = infos_specifiques.get("utilisateurs", "0")
+            st.markdown(f"""
+            <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+                <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                    Compromission
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Comptes compromis</span>
+                    <span style="font-family:monospace; color:#ef4444; font-weight:700;">{total}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Employés</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{employes}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Utilisateurs</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{utilisateurs}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
+        elif r["type"] == "infostealer_email_check":
+            ordinateur = infos_specifiques.get("ordinateur", "Inconnu")
+            corporate = infos_specifiques.get("services_corporate", "0")
+            perso = infos_specifiques.get("services_perso", "0")
+            infecte_depuis = infos_specifiques.get("infecte_depuis", "Non disponible")
+            st.markdown(f"""
+            <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+                <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                    Détails email
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Appareil</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{html.escape(ordinateur)}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Services corporate</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{corporate}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Services perso</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{perso}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Infecté depuis</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{html.escape(infecte_depuis)}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        elif r["type"] in ["ransomware_leak", "ransomware_leak_tn", "ransomware_leak_pays"]:
+            groupe = infos_specifiques.get("groupe", "Non spécifié")
+            entreprise = infos_specifiques.get("entreprise", "Non spécifiée")
+            st.markdown(f"""
+            <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+                <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                    Groupe ransomware
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Groupe</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{html.escape(groupe)}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Entreprise</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{html.escape(entreprise)}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        elif r["type"] == "apt_mention":
+            st.markdown(f"""
+            <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+                <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                    Rapport APT
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Asset mentionné</span>
+                    <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset)}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        elif r["type"] == "deepdarkcti_status":
+            st.markdown(f"""
+            <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+                <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                    Statut deepdarkCTI
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                    <span style="color:#9aa4bd;">Détails</span>
+                    <span style="font-family:monospace; color:#eef1f8; font-size:12px;">{html.escape(details_text)}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- SOURCE ---
+        source_api = str(r['source_api'] or 'Non disponible')
+        source_url = get_source_url(source_api)
+
+        if source_url != "#" and source_api != "Non disponible":
+            source_link = f'<a href="{source_url}" target="_blank" style="color:#5b8def; text-decoration:none; font-family:monospace; font-weight:600; transition:color 0.2s;">{html.escape(source_api)} ↗</a>'
+        else:
+            source_link = f'<span style="font-family:monospace; color:#eef1f8;">{html.escape(source_api)}</span>'
+
+        st.markdown(f"""
+        <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:20px;">
+            <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+                Source
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Source</span>
+                {source_link}
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Terme surveillé</span>
+                <span style="font-family:monospace; color:#eef1f8;">{html.escape(str(r['asset_recherche'] or 'Non spécifié'))}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
+                <span style="color:#9aa4bd;">Élément</span>
+                <span style="font-family:monospace; color:#5b8def; text-align:right; word-break:break-all;">{html.escape(asset)}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ============================================================
+    # === ACTIONS ===
+    # ============================================================
+    st.markdown(f"""
+    <style>
+    .st-key-actions_panel_{aid} {{
+        background:#0f1524;
+        border:1px solid #1c2436;
+        border-radius:10px;
+        padding:20px 24px;
+        margin-bottom:24px;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+    with st.container(key=f"actions_panel_{aid}"):
+        st.markdown("""
+        <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 14px 0; font-weight:700;">
+            Actions
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_status, col_export = st.columns([2, 1])
+        with col_status:
+            current_status = st.session_state.get(status_key, "Nouveau")
+            status_options = list(STATUS_META.keys())
+            try:
+                default_index = status_options.index(current_status)
+            except ValueError:
+                default_index = 0
+
+            new_status = st.selectbox(
+                "Statut",
+                options=status_options,
+                format_func=lambda s: f"{STATUS_META[s]['dot']} {s}",
+                index=default_index,
+                key=f"select_status_{aid}",
+                label_visibility="collapsed",
+            )
+            if new_status != current_status:
+                st.session_state[status_key] = new_status
+                st.rerun()
+
+        with col_export:
+            csv_data = ligne.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇ Exporter (CSV)",
+                data=csv_data,
+                file_name=f"alerte_{aid:04d}.csv",
+                mime="text/csv",
+                key=f"export_{aid}",
+                use_container_width=True,
+            )
+
+        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+
+        # Checklist
+        checklist_store_key = f"checklist_{aid}"
+        if checklist_store_key not in st.session_state:
+            st.session_state[checklist_store_key] = {item: False for item in CHECKLIST_ITEMS}
+
+        done_count = 0
+        for item in CHECKLIST_ITEMS:
+            cb_key = f"check_{aid}_{item}"
+            checked = st.checkbox(
+                item,
+                value=st.session_state[checklist_store_key][item],
+                key=cb_key,
+            )
+            st.session_state[checklist_store_key][item] = checked
+            if checked:
+                done_count += 1
+
+        st.progress(done_count / len(CHECKLIST_ITEMS))
+        st.caption(f"{done_count}/{len(CHECKLIST_ITEMS)} actions complétées")
+
+        if st.button("💾 Enregistrer", key=f"save_checklist_{aid}"):
+            st.toast("Actions enregistrées", icon="✅")
+
+    # ============================================================
+    # === NOTES (corrigé) ===
+    # ============================================================
+    notes_list_key = f"notes_list_{aid}"
+    if notes_list_key not in st.session_state:
+        st.session_state[notes_list_key] = []
+
+    st.markdown(f"""
+    <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:24px;">
+        <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
+            Notes
+        </div>
+    """, unsafe_allow_html=True)
+
+    if not st.session_state[notes_list_key]:
+        st.markdown('<div style="font-size:13px; color:#5c6480; font-style:italic; padding:4px 0 12px 0;">Aucune note pour le moment.</div>', unsafe_allow_html=True)
+    else:
+        for note in st.session_state[notes_list_key]:
+            st.markdown(f"""
+            <div style="padding:10px 0; border-bottom:1px solid #1c2436;">
+                <div style="font-family:monospace; font-size:11px; color:#5c6480; margin-bottom:3px;">{note['time']}</div>
+                <div style="font-size:13px; color:#9aa4bd; line-height:1.5;">{html.escape(note['text'])}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # CORRECTION : label non vide
+    new_note = st.text_area(
+        "Nouvelle note",
+        key=f"new_note_input_{aid}",
+        placeholder="Ajouter une note d'investigation...",
+        height=60,
+        label_visibility="collapsed",
+    )
+
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
+    with col_btn1:
+        if st.button("Ajouter la note", key=f"add_note_{aid}"):
+            if new_note.strip():
+                st.session_state[notes_list_key].append({
+                    "text": new_note.strip(),
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+                st.rerun()
+            else:
+                st.toast("Écris une note avant d'enregistrer.", icon="⚠️")
+
+    st.markdown('</div>', unsafe_allow_html=True)
 # ============================================================
-# PAGE : LEAKS
+# PAGE : RANSOMWARE INTELLIGENCE (TRI PAR DATE)
 # ============================================================
-def page_leaks():
+_RE_GROUPE = _re.compile(r"Groupe ransomware:\s*([^,]+)")
+
+def extraire_groupe_ransomware(details: str) -> str:
+    if not details:
+        return "Inconnu"
+    m = _RE_GROUPE.search(details)
+    return m.group(1).strip() if m else "Inconnu"
+
+def page_ransomware_intel():
     df = charger_donnees()
-    leaks_all = df[df["type"].isin(LEAK_TYPES)].copy() if not df.empty else df
 
     h1, h2 = st.columns([3, 1])
     with h1:
         st.markdown(f"""
         <h2 style="font-size:28px; font-weight:700; color:{C['on_surface']}; margin:0 0 4px 0;">
-            Database Leaks
+            Ransomware Intelligence
         </h2>
-        <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0;">
-            Fuites de données actives et historiques affectant les assets surveillés.
+        <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0; display:flex; align-items:center; gap:6px;">
+            <span class="live-dot" style="background:#ef4444;"></span>
+            Suivi en temps réel des sites de fuite et des cibles tunisiennes (propulsé par Ransomware.live)
         </p>
         """, unsafe_allow_html=True)
     with h2:
-        recherche = st.text_input("Rechercher", placeholder="🔎 Rechercher un leak, un asset...",
-                                   label_visibility="collapsed", key="leaks_search")
+        pass
+
     st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:16px 0 20px 0;'>", unsafe_allow_html=True)
 
-    if leaks_all.empty:
-        st.info("Aucune fuite de données détectée pour le moment (types concernés : "
-                "infostealer_compromise, credential_leak, ransomware_leak).")
+    ransomware_types = ["ransomware_leak", "ransomware_leak_tn", "ransomware_leak_pays", "ransomware_global_feed"]
+    df_rw = df[df["type"].isin(ransomware_types)].copy() if not df.empty else df
+    df_global = df_rw[df_rw["type"] == "ransomware_global_feed"].copy()
+    df_tn = df_rw[df_rw["type"] == "ransomware_leak_tn"].copy()
+
+    if df_rw.empty:
+        st.info("Aucune donnée ransomware en base. Active RansomwareLive et/ou Tunisia Watch dans Settings.")
         return
 
-    total_leaks = len(leaks_all)
-    high_risk = int((leaks_all["severity"] == "critique").sum())
-    seuil_7j = datetime.now() - timedelta(days=7)
-    nouveaux_7j = int((leaks_all["date_insertion_dt"] >= seuil_7j).sum())
+    df_rw["groupe"] = df_rw["details"].apply(extraire_groupe_ransomware)
+    if not df_tn.empty:
+        df_tn["groupe"] = df_tn["details"].apply(extraire_groupe_ransomware)
 
-    stat_cols = st.columns(3)
+    ddcti = df[df["type"] == "deepdarkcti_status"] if not df.empty else pd.DataFrame()
+    if not ddcti.empty:
+        derniere_ligne = ddcti.sort_values("date_insertion_dt", ascending=False).iloc[0]
+        m_ddcti = _re.search(r"(\d+)\s+groupes ransomware marqués ONLINE sur (\d+)", derniere_ligne["details"] or "")
+        sites_actifs = m_ddcti.group(1) if m_ddcti else str(df_rw["groupe"].nunique())
+        sites_sub = f"Sur {m_ddcti.group(2)} suivis" if m_ddcti else "Groupes ransomware distincts observés"
+    else:
+        sites_actifs = str(df_rw["groupe"].nunique())
+        sites_sub = "Groupes ransomware distincts observés"
+
+    seuil_24h = datetime.now() - timedelta(hours=24)
+    victimes_24h = int((df_rw["date_insertion_dt"] >= seuil_24h).sum())
+    total_tn = len(df_tn)
+    groupe_actif_tn = df_tn["groupe"].mode().iloc[0] if not df_tn.empty and not df_tn["groupe"].mode().empty else "—"
+
+    stat_cols = st.columns(4)
     stats = [
-        ("TOTAL LEAKS SURVEILLÉS", str(total_leaks), "database", C["accent"]),
-        ("ALERTES HAUT RISQUE", str(high_risk), "warning", "#ef4444"),
-        ("NOUVEAUX (7J)", str(nouveaux_7j), "fiber_new", "#f59e0b"),
+        ("ACTIVE LEAK SITES", str(sites_actifs), "public", C["accent"], sites_sub),
+        ("VICTIMES (24H)", str(victimes_24h), "warning", "#ef4444", "Toutes sources confondues"),
+        ("CIBLES TUNISIENNES", str(total_tn), "location_on", "#f59e0b", f"{total_tn} cibles tunisiennes identifiées"),
+        ("GROUPE LE + ACTIF (TN)", groupe_actif_tn, "group", C["on_surface"], "Sur les cibles tunisiennes connues"),
     ]
-    for col, (label, value, icon, color) in zip(stat_cols, stats):
+    for col, (label, value, icon, color, sub) in zip(stat_cols, stats):
         with col:
             st.markdown(f"""
             <div class="glass-card">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                     <span class="stat-label">{html.escape(label)}</span>
-                    <span class="material-symbols-outlined" style="font-size:20px; color:{color}; opacity:0.7;">{icon}</span>
+                    <span class="material-symbols-outlined" style="font-size:18px; color:{color};">{icon}</span>
                 </div>
-                <div class="stat-value" style="color:{color if label != 'TOTAL LEAKS SURVEILLÉS' else C['on_surface']};">{html.escape(value)}</div>
+                <div class="stat-value" style="font-size:22px; color:{color if label!='GROUPE LE + ACTIF (TN)' else C['on_surface']};">{html.escape(str(value))}</div>
+                <div class="stat-sub">{html.escape(sub)}</div>
             </div>
             """, unsafe_allow_html=True)
 
     st.write("")
+    col_feed, col_tn = st.columns([8, 4])
 
-    leaks_filtre = leaks_all.copy()
-    if recherche:
-        masque = (leaks_filtre["asset_concerne"].astype(str).str.contains(recherche, case=False, na=False) |
-                  leaks_filtre["asset_recherche"].astype(str).str.contains(recherche, case=False, na=False) |
-                  leaks_filtre["source_api"].astype(str).str.contains(recherche, case=False, na=False) |
-                  leaks_filtre["type"].astype(str).str.contains(recherche, case=False, na=False))
-        leaks_filtre = leaks_filtre[masque]
-    leaks_filtre = leaks_filtre.sort_values("date_insertion_dt", ascending=False)
-
-    selected_id = st.session_state.get("leak_detail_id")
-    if selected_id not in leaks_filtre["id"].values:
-        selected_id = leaks_filtre.iloc[0]["id"] if not leaks_filtre.empty else None
-        st.session_state["leak_detail_id"] = selected_id
-
-    col_list, col_detail = st.columns([2, 1])
-
-    with col_list:
+    with col_feed:
         st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
-        h1c, h2c = st.columns([5, 1])
-        h1c.markdown('<div class="card-title" style="border:none; margin:12px 0 0 16px;">Recent Detections</div>',
-                     unsafe_allow_html=True)
+        h1c, h2c = st.columns([5, 1.5])
+        h1c.markdown(f"""
+        <div style="padding:14px 16px 0 16px; display:flex; align-items:center; gap:8px;">
+            <span class="material-symbols-outlined" style="font-size:18px; color:{C['accent']};">stream</span>
+            <span style="font-size:15px; font-weight:700; color:{C['on_surface']};">Global Ransomware Feed</span>
+        </div>
+        """, unsafe_allow_html=True)
         with h2c:
-            st.download_button("EXPORT", data=leaks_filtre.drop(columns=["date_insertion_dt"]).to_csv(index=False),
-                                file_name="leaks_export.csv", mime="text/csv", key="leaks_export")
+            source_export = df_global if not df_global.empty else df_rw
+            st.download_button("EXPORT", data=source_export.drop(columns=["date_insertion_dt"]).to_csv(index=False),
+                                file_name="ransomware_feed.csv", mime="text/csv", key="rw_export")
 
-        page_df, page, total_pages, debut, fin, total = paginer(leaks_filtre, "leaks_page", taille_page=8)
+        # ===== TRI : Les plus récentes en premier =====
+        feed = (df_global if not df_global.empty else df_rw).sort_values("date_insertion_dt", ascending=False)
 
+        page_df, page, total_pages, debut, fin, total = paginer(feed, "ransomware_feed_page", taille_page=10)
         st.markdown(f"""
-        <div class="data-toolbar" style="border-top:1px solid {C['outline_variant']};">
+        <div class="data-toolbar" style="margin-top:10px;">
             <span class="pagination-info">Affichage {debut}-{fin} sur {total}</span>
         </div>
         """, unsafe_allow_html=True)
 
         if page_df.empty:
-            st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>Aucun leak ne correspond à ta recherche.</p>",
+            st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>Aucune victime dans le flux.</p>",
                          unsafe_allow_html=True)
         else:
-            header_cols = st.columns([1.3, 1.6, 1.6, 1.2, 1.3, 0.8])
-            for c, h in zip(header_cols, ["Date", "Type", "Asset concerné", "Source", "Risque", ""]):
-                c.markdown(f"<span class='stat-label'>{h}</span>", unsafe_allow_html=True)
-            st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 16px 4px 16px;'>",
-                         unsafe_allow_html=True)
-
+            rows = ""
             for _, r in page_df.iterrows():
-                meta = sev_meta(r["severity"])
-                t_meta = type_meta(r["type"])
                 date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["date_insertion_dt"]) else "—"
-                is_selected = r["id"] == selected_id
-                row_cols = st.columns([1.3, 1.6, 1.6, 1.2, 1.3, 0.8])
-                row_cols[0].markdown(f"<span style='font-family:monospace; font-size:11.5px; color:{C['outline']};'>{html.escape(date_str)}</span>",
-                                      unsafe_allow_html=True)
-                row_cols[1].markdown(f"<span style='font-size:12.5px; color:{C['on_surface']}; {'font-weight:700;' if is_selected else ''}'>"
-                                      f"{html.escape(t_meta['label'])}</span>", unsafe_allow_html=True)
-                row_cols[2].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>"
-                                      f"{html.escape(str(r['asset_concerne'] or '—'))}</span>", unsafe_allow_html=True)
-                row_cols[3].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>{html.escape(str(r['source_api'] or ''))}</span>",
-                                      unsafe_allow_html=True)
-                row_cols[4].markdown(badge_pill(meta["label"].upper(), meta["color"], meta["bg"]), unsafe_allow_html=True)
-                btn_label = "● Voir" if is_selected else "Voir"
-                if row_cols[5].button(btn_label, key=f"open_leak_{r['id']}"):
-                    st.session_state["leak_detail_id"] = r["id"]
-                    st.rerun()
+                drapeau = country_to_flag(r["country"]) if r["country"] else "🏳️"
+                groupe = extraire_groupe_ransomware(r["details"])
+                victime = str(r["asset_concerne"] or "—")
+                is_tn = r["type"] == "ransomware_leak_tn"
+                row_style = f"background:{hex_to_rgba('#f59e0b', 0.08)};" if is_tn else ""
+                nom_style = f"color:#ef4444; font-weight:700;" if is_tn else f"color:{C['on_surface']};"
+                lien = ""
+                if victime and "." in victime and " " not in victime:
+                    cible = victime if victime.startswith("http") else f"https://{victime}"
+                    lien = (f"<a href='{html.escape(cible)}' target='_blank' style='color:{C['accent']};'>"
+                            f"<span class='material-symbols-outlined' style='font-size:15px; vertical-align:middle;'>open_in_new</span></a>")
+                rows += f"""<tr style="{row_style}">
+                    <td style="color:{C['outline']}">{html.escape(date_str)}</td>
+                    <td style="{nom_style}">{html.escape(groupe)}</td>
+                    <td style="{nom_style}">{html.escape(victime)}</td>
+                    <td style="text-align:center; font-size:15px;">{drapeau}</td>
+                    <td style="text-align:right;">{lien}</td>
+                </tr>"""
+
+            st.markdown(f"""
+            <table class="aegis-table">
+                <thead><tr>
+                    <th>Date ajoutée</th><th>Groupe</th><th>Victime</th>
+                    <th style="text-align:center;">Pays</th><th style="text-align:right;">Lien</th>
+                </tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
         st.write("")
-        controles_pagination("leaks_page", page, total_pages, "leaks")
+        controles_pagination("ransomware_feed_page", page, total_pages, "ransomware_feed")
 
-    with col_detail:
-        if selected_id is None:
-            st.markdown('<div class="glass-card" style="text-align:center; padding:40px 16px;">', unsafe_allow_html=True)
-            st.markdown(f"<span class='material-symbols-outlined' style='font-size:32px; color:{C['outline']};'>leak_add</span>",
-                         unsafe_allow_html=True)
-            st.markdown(f"<p style='color:{C['on_surface_variant']}; margin-top:8px;'>Sélectionne un leak dans la liste.</p>",
-                         unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-            return
-
-        r = leaks_all[leaks_all["id"] == selected_id].iloc[0]
-        meta = sev_meta(r["severity"])
-        t_meta = type_meta(r["type"])
-        date_detection_str = str(r["date_detection"]) if r["date_detection"] else "—"
-
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    with col_tn:
+        # ============================================================
+        # COLONNE DE DROITE - FOCUS TUNISIE
+        # ============================================================
         st.markdown(f"""
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
-            <div>
-                {badge_pill(meta['label'].upper() + ' RISK', meta['color'], meta['bg'])}
-                <h3 style="font-size:17px; font-weight:700; color:{C['on_surface']}; margin:8px 0 2px 0;">
-                    {html.escape(t_meta['label'])}
-                </h3>
-                <p style="font-size:11px; color:{C['outline']}; font-family:monospace; margin:0;">ID: LEAK-{int(r['id']):04d}</p>
+        <div class="glass-card" style="border:1px solid rgba(245,158,11,0.3);">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+                <span class="material-symbols-outlined" style="font-size:18px; color:#f59e0b;">crisis_alert</span>
+                <span style="font-size:15px; font-weight:700; color:#f59e0b;">Focus Tunisie</span>
+                <span style="margin-left:auto; font-size:11px; background:rgba(245,158,11,0.15); padding:2px 8px; border-radius:4px; color:#f59e0b;">{total_tn} cibles</span>
             </div>
-        </div>
         """, unsafe_allow_html=True)
 
-        st.markdown(f"""
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px;">
-            <div style="background:{C['surface_low']}; border:1px solid {C['outline_variant']}; border-radius:8px; padding:10px;">
-                <p class="stat-label" style="margin-bottom:4px;">DISCOVERY DATE</p>
-                <p style="font-family:monospace; font-size:12px; color:{C['on_surface']}; margin:0;">{html.escape(date_detection_str)}</p>
-            </div>
-            <div style="background:{C['surface_low']}; border:1px solid {C['outline_variant']}; border-radius:8px; padding:10px;">
-                <p class="stat-label" style="margin-bottom:4px;">SOURCE</p>
-                <p style="font-family:monospace; font-size:12px; color:{C['on_surface']}; margin:0;">{html.escape(str(r['source_api'] or '—'))}</p>
-            </div>
-            <div style="background:{C['surface_low']}; border:1px solid {C['outline_variant']}; border-radius:8px; padding:10px;">
-                <p class="stat-label" style="margin-bottom:4px;">TERME SURVEILLÉ</p>
-                <p style="font-family:monospace; font-size:12px; color:{C['on_surface']}; margin:0;">{html.escape(str(r['asset_recherche'] or '—'))}</p>
-            </div>
-            <div style="background:{C['surface_low']}; border:1px solid {C['outline_variant']}; border-radius:8px; padding:10px;">
-                <p class="stat-label" style="margin-bottom:4px;">ASSET CONCERNÉ</p>
-                <p style="font-family:monospace; font-size:12px; color:{C['on_surface']}; margin:0;">{html.escape(str(r['asset_concerne'] or '—'))}</p>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown(f"""<p class="stat-label" style="border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px;">BREACH ANALYSIS</p>""",
-                     unsafe_allow_html=True)
-        st.markdown(f"<p style='font-size:12.5px; color:{C['on_surface_variant']}; line-height:1.5;'>{html.escape(str(r['details'] or 'Aucun détail disponible.'))}</p>",
-                     unsafe_allow_html=True)
-
-        champs = extract_exposed_fields(r["details"])
-        st.markdown(f"""<p class="stat-label" style="border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:12px;">EXPOSED FIELDS</p>""",
-                     unsafe_allow_html=True)
-        if champs:
-            chips = "".join(badge_pill(c, "#ef4444", "rgba(239,68,68,0.12)") + " " for c in champs)
-            st.markdown(f"<div style='margin-top:6px;'>{chips}</div>", unsafe_allow_html=True)
+        if df_tn.empty:
+            st.caption("Aucune cible tunisienne connue pour le moment.")
         else:
-            st.caption("Aucun champ identifiable automatiquement dans le détail de l'alerte.")
+            # ===== RÉPARTITION PAR SECTEUR =====
+            st.markdown(f"<p class='stat-label' style='border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:4px;'>RÉPARTITION PAR SECTEUR</p>",
+                         unsafe_allow_html=True)
+            rep_secteur = df_tn["sector"].fillna("Non renseigné").value_counts().head(5)
+            total_secteur = rep_secteur.sum()
+            couleurs_secteur = ["#ef4444", "#f59e0b", C["accent"], "#10b981", C["outline"]]
+            
+            if total_secteur > 0:
+                for (secteur, count), coul in zip(rep_secteur.items(), couleurs_secteur):
+                    pct = round(count / total_secteur * 100, 1) if total_secteur else 0
+                    st.markdown(f"""
+                    <div style="margin-bottom:8px;">
+                        <div style="display:flex; justify-content:space-between; font-size:11px; color:{C['on_surface_variant']}; margin-bottom:2px;">
+                            <span>{html.escape(str(secteur))}</span>
+                            <span style="font-weight:600;">{count}</span>
+                        </div>
+                        <div class="progress-track"><div class="progress-fill" style="width:{pct}%; background:{coul};"></div></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("Aucune donnée sectorielle disponible.")
 
-        st.markdown(f"""<p class="stat-label" style="border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:12px;">RECOMMENDED ACTIONS</p>""",
-                     unsafe_allow_html=True)
-        actions_html = ""
-        for a in get_recommended_actions(r["type"]):
-            actions_html += (f"<div style='display:flex; gap:8px; margin-top:8px; font-size:12.5px; "
-                              f"color:{C['on_surface']};'><span class='material-symbols-outlined' "
-                              f"style='font-size:16px; color:{C['accent']};'>key</span><span>{html.escape(a)}</span></div>")
-        st.markdown(actions_html, unsafe_allow_html=True)
+            # ===== GROUPES LES PLUS ACTIFS =====
+            st.markdown(f"<p class='stat-label' style='border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:16px;'>GROUPES LES PLUS ACTIFS</p>",
+                         unsafe_allow_html=True)
+            rep_groupes = df_tn["groupe"].value_counts().head(5)
+            max_count = rep_groupes.max()
+            couleurs_groupes = ["#ef4444", "#f59e0b", C["accent"], "#10b981", C["outline"]]
+            
+            if not rep_groupes.empty and max_count > 0:
+                for (groupe, count), coul in zip(rep_groupes.items(), couleurs_groupes):
+                    pct = round(count / max_count * 100, 1) if max_count else 0
+                    st.markdown(f"""
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                        <span style="width:70px; font-family:monospace; font-size:11px; font-weight:600; color:{C['on_surface']}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{html.escape(groupe)}</span>
+                        <div style="flex:1; background:{C['surface_highest']}; height:8px; border-radius:4px; overflow:hidden;">
+                            <div style="width:{pct}%; background:{coul}; height:100%;"></div>
+                        </div>
+                        <span style="width:25px; text-align:right; font-family:monospace; font-size:11px; color:{coul}; font-weight:700;">{count}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("Aucun groupe identifié.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
+    # ============================================================
+    # GRAPHIQUE TENDANCE ET GROUPES LES PLUS ACTIFS
+    # ============================================================
+    st.write("")
+    col_trend, col_top = st.columns(2)
 
+    with col_trend:
+        st.markdown("""
+        <div class="glass-card">
+            <div class="card-title">Tendance des attaques</div>
+        """, unsafe_allow_html=True)
+        
+        tmp = df_rw.dropna(subset=["date_insertion_dt"]).copy()
+        if tmp.empty:
+            st.caption("Pas encore assez d'historique collecté pour tracer une tendance.")
+        else:
+            tmp["jour"] = tmp["date_insertion_dt"].dt.date
+            idx = pd.date_range(tmp["jour"].min(), tmp["jour"].max(), freq="D").date
+            total_jour = tmp.groupby("jour").size().reindex(idx, fill_value=0)
+            tn_jour = tmp[tmp["type"] == "ransomware_leak_tn"].groupby("jour").size().reindex(idx, fill_value=0)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=idx, y=total_jour.values, name="Toutes victimes",
+                                      mode="lines", line=dict(color=C["accent"], width=2, shape="spline"),
+                                      fill="tozeroy", fillcolor=hex_to_rgba(C["accent"], 0.15)))
+            fig.add_trace(go.Scatter(x=idx, y=tn_jour.values, name="Tunisie",
+                                      mode="lines", line=dict(color="#f59e0b", width=2, shape="spline"),
+                                      fill="tozeroy", fillcolor=hex_to_rgba("#f59e0b", 0.15)))
+            fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              font=dict(color=C["on_surface_variant"], size=11, family="Inter"),
+                              xaxis=dict(showgrid=False, color=C["outline"]),
+                              yaxis=dict(showgrid=True, gridcolor=C["outline_variant"], zeroline=False),
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
+                              hovermode="x unified")
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_top:
+        st.markdown("""
+        <div class="glass-card">
+            <div class="card-title">Groupes les plus actifs en Tunisie</div>
+        """, unsafe_allow_html=True)
+        
+        if df_tn.empty:
+            st.caption("Aucune donnée tunisienne pour établir ce classement.")
+        else:
+            rep_groupes = df_tn["groupe"].value_counts().head(5)
+            max_count = rep_groupes.max()
+            couleurs = ["#ef4444", "#f59e0b", C["accent"], "#10b981", C["outline"]]
+            
+            if max_count > 0:
+                for (groupe, count), coul in zip(rep_groupes.items(), couleurs):
+                    pct = round(count / max_count * 100, 1) if max_count else 0
+                    st.markdown(f"""
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+                        <span style="width:90px; font-family:monospace; font-size:12px; font-weight:700; color:{C['on_surface']}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{html.escape(groupe)}</span>
+                        <div style="flex:1; background:{C['surface_highest']}; height:16px; border-radius:4px; overflow:hidden;">
+                            <div style="width:{pct}%; background:{coul}; height:100%;"></div>
+                        </div>
+                        <span style="width:30px; text-align:right; font-family:monospace; font-size:12px; color:{coul}; font-weight:700;">{count}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("Aucun groupe identifié.")
+        st.markdown('</div>', unsafe_allow_html=True)
 # ============================================================
-# PAGE : SEARCH
+# PAGE : SEARCH (AVEC INTERROGATION DES API EN TEMPS RÉEL)
 # ============================================================
 def page_search():
     df = charger_donnees()
 
-    st.markdown(f"""
-    <h2 style="font-size:28px; font-weight:700; color:{C['on_surface']}; margin:0 0 4px 0;">
-        Dark Web Investigation
-    </h2>
-    <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0 0 20px 0;">
-        Recherche plein texte dans les détections indexées (forums, marketplaces, paste sites...).
-    </p>
+    # Importer les fonctions de main.py pour interroger les APIs
+    try:
+        from main import (
+            verifier_domaine_hudsonrock,
+            verifier_email_hudsonrock,
+            recuperer_victimes_ransomware,
+            chercher_dans_ransomware,
+            recuperer_domaines_checkthesum,
+            chercher_dans_checkthesum,
+            rechercher_ransomlook
+        )
+        API_AVAILABLE = True
+    except ImportError:
+        API_AVAILABLE = False
+
+    st.markdown("""
+    <div class="aegis-header">
+        <div style="display:flex; align-items:center;">
+            <h2>Dark Web Investigation</h2>
+        </div>
+    </div>
     """, unsafe_allow_html=True)
 
-    if df.empty:
-        st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour peupler cette recherche.")
-        return
+    # ============================================================
+    # FILTRES (4 colonnes - incluant la recherche)
+    # ============================================================
+    f1, f2, f3, f4 = st.columns(4)
 
-    q_col, btn_col = st.columns([5, 1])
-    with q_col:
-        requete = st.text_input("Requête", placeholder="🔎 ex: @corporate_domain.com, password, VPN...",
-                                 label_visibility="collapsed", key="search_query")
-    with btn_col:
-        st.button("Exécuter", key="search_execute", width="stretch")
-
-    f1, f2, f3 = st.columns(3)
     with f1:
-        sel_sev = st.multiselect("Sévérité", ["critique", "eleve", "faible"],
-                                  default=["critique", "eleve", "faible"], key="search_sev")
+        search_modes = ["🔎 Recherche globale", "🌐 Recherche par Domaine", "📧 Recherche par Email"]
+        mode = st.selectbox("Type de recherche", search_modes, key="search_mode_select")
+
     with f2:
-        sources_dispo = sorted(df["source_api"].dropna().unique().tolist())
-        sel_sources = st.multiselect("Source", sources_dispo, default=sources_dispo, key="search_sources")
+        severity_options = ["Tous", "Critique", "Élevée", "Moyenne", "Faible"]
+        severity_label = st.selectbox("Niveau de risque", severity_options, key="search_severity")
+
+        severity_map = {
+            "Tous": None,
+            "Critique": "critique",
+            "Élevée": "eleve",
+            "Moyenne": "moyenne",
+            "Faible": "faible"
+        }
+        selected_severity = severity_map[severity_label]
+
     with f3:
         periode = st.selectbox("Période", ["Tout", "Dernières 24h", "7 derniers jours", "30 derniers jours"],
                                 key="search_periode")
 
+    with f4:
+        requete = st.text_input(
+            "Recherche",
+            placeholder="🔎 Rechercher un asset (ex: delice.tn) ...",
+            key="search_query",
+            label_visibility="collapsed"
+        )
+
     st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 16px 0;'>", unsafe_allow_html=True)
 
-    t0 = time.time()
-    resultats = df[df["severity"].isin(sel_sev) & df["source_api"].isin(sel_sources)].copy()
-    if periode != "Tout":
-        heures = {"Dernières 24h": 24, "7 derniers jours": 24 * 7, "30 derniers jours": 24 * 30}[periode]
-        resultats = resultats[resultats["date_insertion_dt"] >= datetime.now() - timedelta(hours=heures)]
-    if requete:
-        colonnes_recherchees = ["id", "type", "asset_recherche", "asset_concerne", "source_api", "details"]
-        masque = pd.Series(False, index=resultats.index)
-        for col in colonnes_recherchees:
-            masque |= resultats[col].astype(str).str.contains(_re.escape(requete), case=False, na=False)
-        resultats = resultats[masque]
-    resultats = resultats.sort_values("date_insertion_dt", ascending=False)
-    duree = time.time() - t0
+    # ============================================================
+    # RECHERCHE DANS LA BASE (assets déjà connus / historisés)
+    # ============================================================
+    resultats_base = pd.DataFrame()
+    resultats_api = []
+    api_errors = []
 
+    if not df.empty:
+        df_filtered = df.copy()
+
+        # --- Filtrer par type de recherche ---
+        if mode == "🌐 Recherche par Domaine":
+            df["_type_recherche"] = df["asset_recherche"].apply(classify_asset_type)
+            df_filtered = df[df["_type_recherche"].isin(["Domaine", "Mot-clé", "Adresse IP"])].copy()
+        elif mode == "📧 Recherche par Email":
+            df["_type_recherche"] = df["asset_recherche"].apply(classify_asset_type)
+            df_filtered = df[df["_type_recherche"] == "Email"].copy()
+
+        if not df_filtered.empty:
+            # --- Filtrer par sévérité ---
+            if selected_severity is not None:
+                df_filtered = df_filtered[df_filtered["severity"] == selected_severity]
+
+            # --- Filtrer par période ---
+            if periode != "Tout":
+                heures = {"Dernières 24h": 24, "7 derniers jours": 24 * 7, "30 derniers jours": 24 * 30}[periode]
+                df_filtered = df_filtered[df_filtered["date_insertion_dt"] >= datetime.now() - timedelta(hours=heures)]
+
+            # --- Recherche textuelle ---
+            if requete:
+                requete_clean = requete.strip()
+                colonnes_recherchees = ["id", "type", "asset_recherche", "asset_concerne", "source_api", "details", "country", "sector"]
+                masque = pd.Series(False, index=df_filtered.index)
+                for col in colonnes_recherchees:
+                    if col in df_filtered.columns:
+                        masque |= df_filtered[col].astype(str).str.contains(_re.escape(requete_clean), case=False, na=False)
+                df_filtered = df_filtered[masque]
+
+            resultats_base = df_filtered.sort_values("date_insertion_dt", ascending=False)
+
+    if not resultats_base.empty:
+        resultats_base = resultats_base.copy()
+        resultats_base["_origine"] = "base"
+
+    # ============================================================
+    # INTERROGATION LIVE DES APIs SUR L'ASSET TAPÉ
+    # ------------------------------------------------------------
+    # IMPORTANT : contrairement à avant, on interroge TOUJOURS les APIs
+    # dès qu'un texte est saisi — pas uniquement quand la base est vide.
+    # L'objectif : pouvoir chercher n'importe quel asset (ex: delice.tn)
+    # même s'il n'a jamais été déclaré/collecté au préalable dans la base.
+    # ============================================================
+    if requete and API_AVAILABLE:
+        with st.spinner(f"🔍 Interrogation des APIs pour '{requete}'..."):
+            asset_search = requete.strip()
+            resultats_api = []
+
+            # Déterminer le type d'asset
+            asset_type = classify_asset_type(asset_search)
+
+            # --- 1. Ransomware.live ---
+            try:
+                victimes = recuperer_victimes_ransomware()
+                for victime in victimes:
+                    titre = (victime.get("post_title") or "").lower()
+                    website = (victime.get("website") or "").lower()
+                    if asset_search.lower() in titre or asset_search.lower() in website:
+                        from main import normaliser_resultat_ransomware
+                        resultats_api.append(normaliser_resultat_ransomware(victime, asset_search))
+            except Exception as e:
+                api_errors.append(f"Ransomware.live: {str(e)[:50]}...")
+
+            # --- 2. Hudson Rock (domaines) ---
+            if asset_type == "Domaine" and mode != "📧 Recherche par Email":
+                try:
+                    resultat_hr = verifier_domaine_hudsonrock(asset_search)
+                    if resultat_hr:
+                        from main import normaliser_resultat_hudsonrock
+                        resultats_api.append(normaliser_resultat_hudsonrock(resultat_hr, asset_search))
+                except Exception as e:
+                    api_errors.append(f"Hudson Rock: {str(e)[:50]}...")
+
+            # --- 3. Hudson Rock (emails) ---
+            if asset_type == "Email" and mode != "🌐 Recherche par Domaine":
+                try:
+                    resultat_hr_email = verifier_email_hudsonrock(asset_search)
+                    if resultat_hr_email:
+                        from main import normaliser_resultat_hudsonrock_email
+                        resultats_api.append(normaliser_resultat_hudsonrock_email(resultat_hr_email, asset_search))
+                except Exception as e:
+                    api_errors.append(f"Hudson Rock email: {str(e)[:50]}...")
+
+            # --- 4. Check-The-Sum (silencieux) ---
+            try:
+                urls = recuperer_domaines_checkthesum()
+                if urls:
+                    for url in urls:
+                        if asset_search.lower() in url.lower():
+                            from main import normaliser_resultat_checkthesum
+                            resultats_api.append(normaliser_resultat_checkthesum(url, asset_search))
+            except Exception:
+                pass
+
+            # --- 5. RansomLook ---
+            try:
+                from main import rechercher_ransomlook
+                resultats_ransomlook = rechercher_ransomlook([asset_search])
+                if resultats_ransomlook:
+                    resultats_api.extend(resultats_ransomlook)
+            except Exception:
+                pass
+
+    # ============================================================
+    # AFFICHAGE DES RÉSULTATS
+    # ============================================================
     def snippet(details: str, terme: str, largeur: int = 60) -> str:
         details = details or ""
         if not terme:
             return html.escape(details[:140]) + ("…" if len(details) > 140 else "")
-        idx = details.lower().find(terme.lower())
+        terme_clean = terme.strip()
+        idx = details.lower().find(terme_clean.lower())
         if idx == -1:
             return html.escape(details[:140]) + ("…" if len(details) > 140 else "")
         debut = max(idx - largeur, 0)
-        fin = min(idx + len(terme) + largeur, len(details))
+        fin = min(idx + len(terme_clean) + largeur, len(details))
         avant = html.escape(details[debut:idx])
-        match = html.escape(details[idx:idx + len(terme)])
-        apres = html.escape(details[idx + len(terme):fin])
+        match = html.escape(details[idx:idx + len(terme_clean)])
+        apres = html.escape(details[idx + len(terme_clean):fin])
         prefixe = "…" if debut > 0 else ""
         suffixe = "…" if fin < len(details) else ""
-        return f"{prefixe}{avant}<span class='search-hit'>{match}</span>{apres}{suffixe}"
+        return f"{prefixe}{avant}<span style='background:#1e293b; padding:1px 4px; border-radius:3px; font-weight:600; color:{C['accent']};'>{match}</span>{apres}{suffixe}"
+
+    # --- Combiner les résultats (base + APIs live, dédupliqués) ---
+    df_api = pd.DataFrame()
+    if resultats_api:
+        df_api = pd.DataFrame(resultats_api)
+        df_api["_origine"] = "live"
+        if "date_insertion_dt" not in df_api.columns:
+            df_api["date_insertion_dt"] = datetime.now()
+        if "date_insertion" not in df_api.columns:
+            df_api["date_insertion"] = datetime.now().isoformat()
+
+        # Dédoublonnage léger : si un résultat live correspond déjà à une ligne
+        # de la base (même asset_concerne + même source), on ne le montre pas deux fois.
+        if not resultats_base.empty and "asset_concerne" in df_api.columns:
+            deja_connus = set(
+                zip(
+                    resultats_base.get("asset_concerne", pd.Series(dtype=str)).astype(str),
+                    resultats_base.get("source_api", pd.Series(dtype=str)).astype(str),
+                )
+            )
+            masque_nouveaux = ~df_api.apply(
+                lambda row: (str(row.get("asset_concerne", "")), str(row.get("source_api", ""))) in deja_connus,
+                axis=1,
+            )
+            df_api = df_api[masque_nouveaux]
+
+        # Génère un id unique pour les résultats live (évite les collisions de key Streamlit)
+        if "id" not in df_api.columns or df_api["id"].isna().any():
+            df_api["id"] = [f"live_{i}" for i in range(len(df_api))]
+
+    resultats_combined = pd.concat([resultats_base, df_api], ignore_index=True) if (not resultats_base.empty or not df_api.empty) else pd.DataFrame()
+
+    # ===== TRI PAR DATE DE PREMIÈRE DÉTECTION (même logique que la page Alerts) =====
+    if not resultats_combined.empty:
+        def to_naive_datetime(col):
+            dt = pd.to_datetime(col, errors="coerce", utc=True)
+            if hasattr(dt, 'dt') and dt.dt.tz is not None:
+                dt = dt.dt.tz_localize(None)
+            return dt
+
+        if "date_detection" in resultats_combined.columns:
+            resultats_combined["date_detection_dt"] = to_naive_datetime(resultats_combined["date_detection"])
+        else:
+            resultats_combined["date_detection_dt"] = pd.NaT
+
+        # Les résultats live (API) n'ont généralement pas de date_detection propre :
+        # ils sont relégués après les alertes en base qui en ont une, exactement
+        # comme sur la page Alerts (na_position="last").
+        resultats_combined = resultats_combined.sort_values("date_detection_dt", ascending=False, na_position="last")
+
+    # --- Afficher les résultats ---
+    if resultats_combined.empty:
+        if requete:
+            st.info(f"🔍 Aucun résultat trouvé pour '{requete}' dans la base et les APIs.")
+            if api_errors:
+                with st.expander("ℹ️ Détails techniques (APIs)"):
+                    for err in api_errors[:3]:
+                        st.caption(f"• {err}")
+                    if len(api_errors) > 3:
+                        st.caption(f"• ... et {len(api_errors) - 3} autres erreurs")
+        else:
+            st.info("🔍 Saisissez un terme de recherche pour commencer — n'importe quel asset (domaine, email, mot-clé), même s'il n'a jamais été collecté auparavant.")
+        return
+
+    nb_base = int((resultats_combined["_origine"] == "base").sum()) if "_origine" in resultats_combined.columns else 0
+    nb_live = int((resultats_combined["_origine"] == "live").sum()) if "_origine" in resultats_combined.columns else 0
 
     st.markdown(f"""
     <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px;">
-        <span style="font-size:15px; font-weight:700; color:{C['on_surface']};">Search Results
-            <span style="font-size:12px; font-weight:400; color:{C['on_surface_variant']};">
-                ({len(resultats)} résultat{'s' if len(resultats) != 1 else ''} en {duree:.2f}s)
+        <span style="font-size:15px; font-weight:600; color:#f8fafc;">Search Results
+            <span style="font-size:12px; font-weight:400; color:#94a3b8;">
+                ({len(resultats_combined)} résultat{'s' if len(resultats_combined) != 1 else ''}
+                {f' · 📊 {nb_base} en base' if nb_base else ''}{f' · 🌐 {nb_live} en direct (API)' if nb_live else ''})
             </span>
         </span>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
-    page_df, page, total_pages, debut_p, fin_p, total = paginer(resultats, "search_page", taille_page=10)
+    st.markdown('<div class="bg-panel" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
+    page_df, page, total_pages, debut_p, fin_p, total = paginer(resultats_combined, "search_page", taille_page=10)
 
     st.markdown(f"""
-    <div class="data-toolbar">
-        <span class="pagination-info">Affichage {debut_p}-{fin_p} sur {total}</span>
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid {C['outline_variant']}; background:rgba(30,41,59,0.2);">
+        <span style="font-size:12px; color:#94a3b8;">Affichage {debut_p}-{fin_p} sur {total}</span>
     </div>
     """, unsafe_allow_html=True)
 
-    if page_df.empty:
-        st.markdown(f"<p style='color:{C['on_surface_variant']}; padding:20px;'>Aucun résultat pour cette recherche.</p>",
-                     unsafe_allow_html=True)
-    else:
-        header_cols = st.columns([0.6, 1.3, 3.2, 1.5, 1.2, 1.1, 0.8])
-        for c, h in zip(header_cols, ["Risque", "Date", "Contexte", "Asset", "Source", "Type", ""]):
-            c.markdown(f"<span class='stat-label'>{h}</span>", unsafe_allow_html=True)
-        st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 4px 0;'>", unsafe_allow_html=True)
+    header_cols = st.columns([0.5, 1.2, 2.8, 1.5, 1.2, 1, 0.6, 0.6])
+    for c, h in zip(header_cols, ["", "Date", "Contexte", "Asset", "Source", "Type", "Origine", ""]):
+        c.markdown(f"<span style='font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:#94a3b8;'>{h}</span>", unsafe_allow_html=True)
+    st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 4px 0;'>", unsafe_allow_html=True)
 
-        for _, r in page_df.iterrows():
-            meta = sev_meta(r["severity"])
-            t_meta = type_meta(r["type"])
-            date_str = r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["date_insertion_dt"]) else "—"
-            row_cols = st.columns([0.6, 1.3, 3.2, 1.5, 1.2, 1.1, 0.8])
-            row_cols[0].markdown(f"<span class='sev-dot' style='display:inline-block; background:{meta['color']}; "
-                                  f"box-shadow:0 0 6px {meta['color']}88;'></span>", unsafe_allow_html=True)
-            row_cols[1].markdown(f"<span style='font-family:monospace; font-size:11px; color:{C['on_surface_variant']};'>{html.escape(date_str)}</span>",
-                                  unsafe_allow_html=True)
-            row_cols[2].markdown(f"<span style='font-size:12px; color:{C['on_surface_variant']};'>{snippet(r['details'], requete)}</span>",
-                                  unsafe_allow_html=True)
-            row_cols[3].markdown(f"<span style='font-size:12px; color:{C['on_surface']};'>{html.escape(str(r['asset_concerne'] or '—'))}</span>",
-                                  unsafe_allow_html=True)
-            row_cols[4].markdown(f"<span style='font-size:12px; color:{C['on_surface_variant']};'>{html.escape(str(r['source_api'] or ''))}</span>",
-                                  unsafe_allow_html=True)
-            row_cols[5].markdown(f"<span style='font-size:12px; color:{C['on_surface_variant']};'>{html.escape(t_meta['label'])}</span>",
-                                  unsafe_allow_html=True)
-            if row_cols[6].button("Voir →", key=f"search_open_{r['id']}"):
-                st.session_state["alert_detail_id"] = r["id"]
-                st.session_state.page = "alerts"
-                st.rerun()
+    for _, r in page_df.iterrows():
+        meta = sev_meta(r["severity"]) if "severity" in r and pd.notna(r.get("severity")) else sev_meta("faible")
+        t_meta = type_meta(r["type"]) if "type" in r and pd.notna(r.get("type")) else {"label": "Inconnu", "icon": "report"}
+        date_str = (
+            r["date_detection_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r.get("date_detection_dt"))
+            else r["date_insertion_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r.get("date_insertion_dt"))
+            else "—"
+        )
+        row_cols = st.columns([0.5, 1.2, 2.8, 1.5, 1.2, 1, 0.6, 0.6])
+
+        row_cols[0].markdown(f"""
+        <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:{meta['color']}; box-shadow:0 0 8px {meta['color']}66;"></span>
+        """, unsafe_allow_html=True)
+
+        row_cols[1].markdown(f"<span style='font-family:monospace; font-size:11px; color:#475569;'>{html.escape(date_str)}</span>", unsafe_allow_html=True)
+        row_cols[2].markdown(f"<span style='font-size:12px; color:#94a3b8; line-height:1.4;'>{snippet(str(r.get('details', '')), requete)}</span>", unsafe_allow_html=True)
+        row_cols[3].markdown(f"<span style='font-size:12px; color:#f8fafc;'>{html.escape(str(r.get('asset_concerne', '—')))}</span>", unsafe_allow_html=True)
+        row_cols[4].markdown(f"<span style='font-size:12px; color:#94a3b8;'>{html.escape(str(r.get('source_api', '')))}</span>", unsafe_allow_html=True)
+        row_cols[5].markdown(f"<span style='font-size:11px; color:#94a3b8;'>{html.escape(t_meta['label'])}</span>", unsafe_allow_html=True)
+
+        origine = r.get("_origine", "base")
+        if origine == "live":
+            row_cols[6].markdown("<span title='Résultat obtenu en direct depuis les APIs, non stocké en base' style='font-size:11px;'>🌐</span>", unsafe_allow_html=True)
+        else:
+            row_cols[6].markdown("<span title='Résultat déjà présent dans la base' style='font-size:11px;'>📊</span>", unsafe_allow_html=True)
+
+        alert_id = r.get("id")
+        if origine == "base" and alert_id is not None and row_cols[7].button("→", key=f"search_open_{alert_id}"):
+            st.session_state["alert_detail_id"] = alert_id
+            st.session_state.page = "alerts"
+            st.rerun()
+
+        # --- Panneau "Plus de détails" : uniquement pour les résultats LIVE ---
+        # Les résultats déjà en base ont déjà la flèche "→" qui ouvre la fiche complète,
+        # donc pas besoin d'un expander redondant pour eux.
+        if origine == "live":
+            details_full = str(r.get("details", "") or "Aucun détail disponible.")
+            asset_concerne_val = str(r.get("asset_concerne", "") or "Non spécifié")
+            asset_recherche_val = str(r.get("asset_recherche", "") or requete or "Non spécifié")
+            secteur_val = str(r.get("sector", "") or "Non disponible")
+            pays_val = str(r.get("country", "") or "Non disponible")
+            source_val = str(r.get("source_api", "") or "Non disponible")
+            severity_label = meta.get("label", "—")
+
+            expander_label = f"Plus de détails — {asset_concerne_val}" if asset_concerne_val != "Non spécifié" else "Plus de détails"
+            with st.expander(expander_label, expanded=False):
+                st.markdown(f"""
+                <div style="margin-bottom:12px;">
+                    <span style="background:rgba(91,141,239,0.12); color:#5b8def; font-size:10px; font-weight:700; padding:3px 8px; border-radius:4px;">🌐 RÉSULTAT LIVE (API, non stocké)</span>
+                </div>
+                <div style="font-size:13.5px; line-height:1.6; color:#9aa4bd; margin-bottom:14px;">
+                    {html.escape(details_full)}
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 20px;">
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Asset concerné</span>
+                        <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset_concerne_val)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Terme recherché</span>
+                        <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset_recherche_val)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Secteur</span>
+                        <span style="font-family:monospace; color:#eef1f8;">{html.escape(secteur_val)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Pays</span>
+                        <span style="font-family:monospace; color:#eef1f8;">{html.escape(pays_val)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Source</span>
+                        <span style="font-family:monospace; color:#eef1f8;">{html.escape(source_val)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid {C['outline_variant']}; font-size:13px;">
+                        <span style="color:#9aa4bd;">Sévérité</span>
+                        <span style="font-family:monospace; color:{meta['color']};">{html.escape(severity_label)}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.caption("Ce résultat provient d'une interrogation en direct des APIs et n'est pas encore enregistré dans la base d'alertes.")
+
+            st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.write("")
     controles_pagination("search_page", page, total_pages, "search")
 
-
 # ============================================================
-# PAGE : REPORTS
-# ============================================================
-def page_reports():
-    df = charger_donnees()
-
-    h1, h2 = st.columns([3, 1])
-    with h1:
-        st.markdown(f"""
-        <h2 style="font-size:28px; font-weight:700; color:{C['on_surface']}; margin:0 0 4px 0;">
-            Reports &amp; Compliance
-        </h2>
-        <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:0;">
-            Vue exécutive des métriques de la période et export des rapports.
-        </p>
-        """, unsafe_allow_html=True)
-    with h2:
-        periode = st.selectbox("Période", ["7 derniers jours", "30 derniers jours", "90 derniers jours", "Tout"],
-                                index=1, key="reports_periode", label_visibility="collapsed")
-    st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:16px 0 20px 0;'>", unsafe_allow_html=True)
-
-    if df.empty:
-        st.info("Aucune alerte en base. Lance le pipeline de collecte (main.py) pour générer des rapports.")
-        return
-
-    jours_map = {"7 derniers jours": 7, "30 derniers jours": 30, "90 derniers jours": 90}
-    if periode == "Tout":
-        n_jours = max((datetime.now() - df["date_insertion_dt"].min()).days, 1) if df["date_insertion_dt"].notna().any() else 1
-        df_periode = df
-    else:
-        n_jours = jours_map[periode]
-        seuil = datetime.now() - timedelta(days=n_jours)
-        df_periode = df[df["date_insertion_dt"] >= seuil]
-
-    seuil_prec_debut = datetime.now() - timedelta(days=n_jours * 2)
-    seuil_prec_fin = datetime.now() - timedelta(days=n_jours)
-    df_precedente = df[(df["date_insertion_dt"] >= seuil_prec_debut) & (df["date_insertion_dt"] < seuil_prec_fin)]
-
-    def variation(actuel: int, precedent: int):
-        if precedent == 0:
-            return None
-        return (actuel - precedent) / precedent * 100
-
-    total_periode = len(df_periode)
-    actives_periode = int(df_periode["severity"].isin(["critique", "eleve"]).sum())
-    critiques_periode = int((df_periode["severity"] == "critique").sum())
-
-    total_prec = len(df_precedente)
-    actives_prec = int(df_precedente["severity"].isin(["critique", "eleve"]).sum())
-    critiques_prec = int((df_precedente["severity"] == "critique").sum())
-
-    def trend_badge(actuel, precedent):
-        var = variation(actuel, precedent)
-        if var is None:
-            return f"<span style='color:{C['on_surface_variant']}; font-family:monospace; font-size:11px;'>—</span>"
-        icon = "trending_up" if var > 0 else ("trending_down" if var < 0 else "trending_flat")
-        color = "#ef4444" if var > 0 else ("#10b981" if var < 0 else C["on_surface_variant"])
-        return (f"<span style='display:inline-flex; align-items:center; gap:2px; color:{color}; "
-                f"font-family:monospace; font-size:11px; background:{color}1a; padding:2px 6px; border-radius:4px;'>"
-                f"<span class='material-symbols-outlined' style='font-size:13px;'>{icon}</span>{abs(var):.1f}%</span>")
-
-    cards = [
-        ("TOTAL DETECTIONS", total_periode, "radar", C["accent"], trend_badge(total_periode, total_prec)),
-        ("ACTIVE ALERTS", actives_periode, "notifications_active", "#f59e0b", trend_badge(actives_periode, actives_prec)),
-        ("CRITICAL RISKS", critiques_periode, "warning", "#ef4444", trend_badge(critiques_periode, critiques_prec)),
-    ]
-    ccols = st.columns(3)
-    for col, (label, value, icon, color, trend) in zip(ccols, cards):
-        with col:
-            st.markdown(f"""
-            <div class="glass-card">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
-                    <span class="stat-label" style="display:flex; align-items:center; gap:6px;">
-                        <span class="material-symbols-outlined" style="font-size:16px; color:{color};">{icon}</span>{label}
-                    </span>
-                    {trend}
-                </div>
-                <div class="stat-value" style="color:{color if label=='CRITICAL RISKS' else C['on_surface']};">{value}</div>
-                <div class="stat-sub">Sur la période sélectionnée</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.write("")
-    col_chart, col_side = st.columns([2, 1])
-
-    with col_chart:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Detection Volume Trend</div>', unsafe_allow_html=True)
-        if df_periode.empty or df_periode["date_insertion_dt"].isna().all():
-            st.caption("Pas assez de données datées sur cette période.")
-        else:
-            tmp = df_periode.dropna(subset=["date_insertion_dt"]).copy()
-            tmp["jour"] = tmp["date_insertion_dt"].dt.date
-            idx = pd.date_range(tmp["jour"].min(), tmp["jour"].max(), freq="D").date
-
-            fig = go.Figure()
-            for sev in ["critique", "eleve", "faible"]:
-                serie = tmp[tmp["severity"] == sev].groupby("jour").size().reindex(idx, fill_value=0)
-                fig.add_trace(go.Scatter(
-                    x=idx, y=serie.values, name=SEVERITY[sev]["label"],
-                    mode="lines", line=dict(color=SEVERITY[sev]["color"], width=2, shape="spline"),
-                    fill="tozeroy", fillcolor=hex_to_rgba(SEVERITY[sev]["color"], 0.15),
-                ))
-            fig.update_layout(
-                height=280, margin=dict(l=0, r=0, t=10, b=0),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=C["on_surface_variant"], size=11, family="Inter"),
-                xaxis=dict(showgrid=False, color=C["outline"]),
-                yaxis=dict(showgrid=True, gridcolor=C["outline_variant"], gridwidth=1, zeroline=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col_side:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">Couverture par Source</div>', unsafe_allow_html=True)
-        if df_periode.empty:
-            st.caption("Aucune donnée sur cette période.")
-        else:
-            rep_sources = df_periode["source_api"].value_counts()
-            total_src = rep_sources.sum()
-            for src, count in rep_sources.items():
-                pct = round(count / total_src * 100, 1) if total_src else 0
-                st.markdown(f"""
-                <div style="margin-bottom:14px;">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                        <span style="font-family:monospace; font-size:12.5px; color:{C['on_surface']};">{html.escape(str(src))}</span>
-                        <span style="font-family:monospace; font-size:12.5px; color:{C['accent']};">{pct}%</span>
-                    </div>
-                    <div class="progress-track">
-                        <div class="progress-fill" style="width:{pct}%; background:{C['accent']}; box-shadow:0 0 8px {C['accent']}80;"></div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.write("")
-
-    st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
-    st.markdown(f"""
-    <div style="padding:16px 20px; border-bottom:1px solid {C['outline_variant']};">
-        <span style="font-size:15px; font-weight:700; color:{C['on_surface']};">Generated Reports</span>
-        <p style="font-size:12px; color:{C['on_surface_variant']}; margin:4px 0 0 0;">Exports générés à partir des données de la période sélectionnée.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    presets = [
-        ("Résumé Exécutif", "Executive", "description", df_periode),
-        ("Rapport Critiques Uniquement", "Compliance", "gavel", df_periode[df_periode["severity"] == "critique"]),
-        ("Export Complet", "Full", "folder_zip", df_periode),
-    ]
-    maintenant = datetime.now().strftime("%Y-%m-%d %H:%M")
-    for nom, type_label, icon, data in presets:
-        rcols = st.columns([3, 1.3, 1.6, 1.2, 1.2])
-        rcols[0].markdown(f"""
-        <div style="display:flex; align-items:center; gap:10px; padding:6px 0;">
-            <div style="width:30px; height:30px; border-radius:6px; background:rgba(56,189,248,0.10);
-                        display:flex; align-items:center; justify-content:center;">
-                <span class="material-symbols-outlined" style="font-size:16px; color:{C['accent']};">{icon}</span>
-            </div>
-            <span style="font-size:12.5px; color:{C['on_surface']};">{html.escape(nom)}</span>
-        </div>
-        """, unsafe_allow_html=True)
-        rcols[1].markdown(f"<span style='font-size:12px; color:{C['on_surface_variant']};'>{type_label}</span>", unsafe_allow_html=True)
-        rcols[2].markdown(f"<span style='font-family:monospace; font-size:11.5px; color:{C['on_surface_variant']};'>{maintenant}</span>",
-                           unsafe_allow_html=True)
-        rcols[3].markdown(badge_pill("PRÊT", C["accent"], "rgba(56,189,248,0.10)"), unsafe_allow_html=True)
-        rcols[4].download_button("CSV", data=data.drop(columns=["date_insertion_dt"]).to_csv(index=False),
-                                  file_name=f"{nom.lower().replace(' ', '_')}.csv", mime="text/csv",
-                                  key=f"report_dl_{nom}")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ============================================================
-# PAGE : SETTINGS — implémentation fonctionnelle
+# PAGE : SETTINGS
 # ============================================================
 def _settings_card_open(icon: str, title: str):
     st.markdown(f"""
@@ -1890,10 +2908,8 @@ def _settings_card_open(icon: str, title: str):
         <div style="padding:24px;">
     """, unsafe_allow_html=True)
 
-
 def _settings_card_close():
     st.markdown("</div></div>", unsafe_allow_html=True)
-
 
 def _settings_field_label(label: str, help_text: str = ""):
     st.markdown(f"""
@@ -1901,11 +2917,7 @@ def _settings_field_label(label: str, help_text: str = ""):
     {f'<p class="settings-field-help">{html.escape(help_text)}</p>' if help_text else ''}
     """, unsafe_allow_html=True)
 
-
 def _save_cancel_buttons(tab_key: str):
-    """Boutons Save/Cancel réels. Save écrit dans settings.json et applique
-    immédiatement (rerun). Cancel recharge les valeurs sauvegardées et
-    réinitialise les widgets de l'onglet courant."""
     st.markdown('<hr class="settings-divider" style="margin-top:20px;">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([6, 1, 1])
     with c2:
@@ -1934,7 +2946,6 @@ def _save_cancel_buttons(tab_key: str):
         st.session_state.app_settings = new_settings
         st.success("Modifications enregistrées ✅")
         st.rerun()
-
 
 def page_settings():
     settings = st.session_state.app_settings
@@ -1977,7 +2988,6 @@ def page_settings():
     with col_content:
         current_tab = st.session_state.get("settings_tab", "general")
 
-        # ---------------- GENERAL ----------------
         if current_tab == "general":
             _settings_card_open("tune", "General Settings")
 
@@ -2031,7 +3041,6 @@ def page_settings():
             _save_cancel_buttons("general")
             _settings_card_close()
 
-        # ---------------- SECURITY ----------------
         elif current_tab == "security":
             _settings_card_open("shield_person", "Account & Security")
 
@@ -2078,7 +3087,6 @@ def page_settings():
             _save_cancel_buttons("security")
             _settings_card_close()
 
-        # ---------------- MONITORING ----------------
         elif current_tab == "monitoring":
             _settings_card_open("radar", "Monitoring Configuration")
 
@@ -2105,14 +3113,22 @@ def page_settings():
                              key="f_monitoring_src_checkthesum")
                 st.checkbox("RansomLook.io", value=settings["monitoring_src_ransomlook"],
                              key="f_monitoring_src_ransomlook")
+                st.checkbox("Tunisia Watch (Ransomware.live /countryvictims)", value=settings["monitoring_tunisia_watch"],
+                             key="f_monitoring_tunisia_watch")
+                st.checkbox("APT Watch (APTnotes — mentions Tunisia/assets)", value=settings["monitoring_apt_watch"],
+                             key="f_monitoring_apt_watch")
+                st.checkbox("deepdarkCTI (statut global des sites de fuite)", value=settings["monitoring_deepdarkcti"],
+                             key="f_monitoring_deepdarkcti")
+                st.checkbox("Export vers Wazuh (log JSON pour agent SIEM)", value=settings["monitoring_wazuh_export"],
+                             key="f_monitoring_wazuh_export")
             st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
 
             c1, c2 = st.columns([1, 2])
             with c1:
                 _settings_field_label("Alert Thresholds", "Minimum severity to trigger alerts.")
             with c2:
-                th_options = ["critique", "eleve", "faible"]
-                th_labels = {"critique": "Critical only", "eleve": "Elevated+", "faible": "All"}
+                th_options = ["critique", "eleve", "moyenne", "faible"]
+                th_labels = {"critique": "Critical only", "eleve": "Elevated+", "moyenne": "Moyenne+", "faible": "All"}
                 st.radio("Seuil", th_options, format_func=lambda x: th_labels[x],
                           index=th_options.index(settings["monitoring_alert_threshold"]) if settings["monitoring_alert_threshold"] in th_options else 1,
                           key="f_monitoring_alert_threshold", horizontal=True, label_visibility="collapsed")
@@ -2124,7 +3140,6 @@ def page_settings():
             _save_cancel_buttons("monitoring")
             _settings_card_close()
 
-        # ---------------- NOTIFICATIONS ----------------
         elif current_tab == "notifications":
             _settings_card_open("campaign", "Notifications")
 
@@ -2162,7 +3177,6 @@ def page_settings():
             _save_cancel_buttons("notifications")
             _settings_card_close()
 
-        # ---------------- TEAM ----------------
         elif current_tab == "team":
             _settings_card_open("group", "Team Management")
 
@@ -2214,7 +3228,6 @@ def page_settings():
 
             _settings_card_close()
 
-
 # ============================================================
 # PAGE : PLACEHOLDER
 # ============================================================
@@ -2231,25 +3244,20 @@ def page_placeholder(titre: str):
     </div>
     """, unsafe_allow_html=True)
 
-
 # ============================================================
 # ROUTAGE
 # ============================================================
 page = st.session_state.page
 if page == "dashboard":
     page_dashboard()
-elif page == "darkweb":
-    page_darkweb()
 elif page == "assets":
     page_assets()
 elif page == "alerts":
     page_alerts()
-elif page == "leaks":
-    page_leaks()
+elif page == "ransomware":
+    page_ransomware_intel()
 elif page == "search":
     page_search()
-elif page == "reports":
-    page_reports()
 elif page == "settings":
     page_settings()
 else:
