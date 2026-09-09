@@ -6,6 +6,9 @@ import io
 import re
 import time
 import socket
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from dotenv import load_dotenv
 from storage import creer_base, sauvegarder_alerte, lire_toutes_les_alertes
@@ -30,6 +33,8 @@ DEFAULT_MAIN_SETTINGS = {
     "monitoring_deepdarkcti": True,
     "monitoring_wazuh_export": True,
     "monitoring_alert_threshold": "faible",
+    "notif_email_recipients": "",
+    "notif_digest_enabled": False,
 }
 
 SEVERITY_RANK = {"critique": 3, "eleve": 2, "faible": 1}
@@ -450,6 +455,193 @@ def envoyer_alerte_syslog(alerte, serveur="192.168.48.134", port=514):
 
 
 # ============================================
+# 3ter. ENVOI D'EMAIL (ALERTES CRITIQUES/ÉLEVÉES + DIGEST QUOTIDIEN)
+# ============================================
+#
+# Configuration requise dans le fichier .env (à la racine du projet) :
+#   SMTP_HOST=smtp.gmail.com
+#   SMTP_PORT=587
+#   SMTP_USER=ton_compte@gmail.com
+#   SMTP_PASSWORD=xxxx xxxx xxxx xxxx      (mot de passe d'application, pas ton mot de passe normal)
+#   SMTP_FROM=ton_compte@gmail.com         (optionnel, sinon = SMTP_USER)
+#
+# Les destinataires sont lus depuis app_settings.json -> "notif_email_recipients"
+# (le champ "Email Recipients" du Dashboard, dans Settings > Team Management).
+# Plusieurs adresses peuvent être séparées par des virgules.
+
+DIGEST_HOUR = 0  # heure fixe d'envoi du résumé quotidien (0 = minuit, 0-23)
+DIGEST_STATE_PATH = "digest_state.json"
+
+
+def _envoyer_email_smtp(destinataires, sujet, corps):
+    """Fonction bas-niveau partagée : ouvre la connexion SMTP et envoie un email."""
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_from = os.getenv("SMTP_FROM") or smtp_user
+
+    if not smtp_host or not smtp_user or not smtp_password:
+        print("⚠️ Envoi d'email désactivé : SMTP_HOST / SMTP_USER / SMTP_PASSWORD manquants dans .env\n")
+        return False
+
+    message = MIMEMultipart()
+    message["From"] = smtp_from
+    message["To"] = ", ".join(destinataires)
+    message["Subject"] = sujet
+    message.attach(MIMEText(corps, "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as serveur:
+            serveur.starttls()
+            serveur.login(smtp_user, smtp_password)
+            serveur.sendmail(smtp_from, destinataires, message.as_string())
+        print(f"📧 Email envoyé à {', '.join(destinataires)} — sujet : {sujet}\n")
+        return True
+    except Exception as e:
+        print(f"❌ Erreur d'envoi d'email : {e}\n")
+        return False
+
+
+def envoyer_email_alertes(alertes, destinataires_str):
+    """Envoie un e-mail immédiat pour les nouvelles alertes critiques/élevées d'un cycle."""
+    if not alertes:
+        return False
+    if not destinataires_str or not destinataires_str.strip():
+        return False
+    destinataires = [d.strip() for d in destinataires_str.split(",") if d.strip()]
+    if not destinataires:
+        return False
+
+    lignes = []
+    for a in alertes:
+        lignes.append(
+            f"[{(a.get('severity') or '').upper()}] {a.get('type')}\n"
+            f"  Asset concerné : {a.get('asset_concerne', 'N/A')}\n"
+            f"  Source         : {a.get('source_api')}\n"
+            f"  Détails        : {a.get('details', '')}"
+        )
+
+    corps = (
+        f"AEGIS MONITOR — {len(alertes)} nouvelle(s) alerte(s) critique(s)/élevée(s) détectée(s)\n"
+        f"Exécution : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        + "\n\n".join(lignes)
+        + "\n\n— Généré automatiquement par le pipeline AEGIS MONITOR."
+    )
+    sujet = f"[AEGIS MONITOR] {len(alertes)} nouvelle(s) alerte(s) critique(s)/élevée(s)"
+    return _envoyer_email_smtp(destinataires, sujet, corps)
+
+
+# ---- Digest quotidien (résumé de 24h, envoyé une seule fois par jour à heure fixe) ----
+
+def _lire_dernier_digest_envoye():
+    """Retourne la date (YYYY-MM-DD) du dernier digest envoyé, ou None."""
+    if not os.path.exists(DIGEST_STATE_PATH):
+        return None
+    try:
+        with open(DIGEST_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("last_sent_date")
+    except Exception:
+        return None
+
+
+def _marquer_digest_envoye(date_str):
+    try:
+        with open(DIGEST_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"last_sent_date": date_str}, f)
+    except OSError as e:
+        print(f"⚠️ Impossible d'enregistrer l'état du digest ({DIGEST_STATE_PATH}) : {e}\n")
+
+
+def construire_corps_digest():
+    """Construit le texte du résumé quotidien à partir des alertes des dernières 24h."""
+    colonnes = ["id", "source_api", "type", "asset_recherche", "asset_concerne",
+                "details", "date_detection", "severity", "date_insertion",
+                "country", "sector"]
+
+    alertes_brutes = lire_toutes_les_alertes()
+    maintenant = datetime.now()
+    seuil_24h = maintenant.timestamp() - 24 * 3600
+
+    total = 0
+    par_severite = {"critique": 0, "eleve": 0, "faible": 0}
+    par_source = {}
+
+    for ligne in alertes_brutes:
+        d = dict(zip(colonnes, ligne))
+        date_insertion_str = d.get("date_insertion")
+        if not date_insertion_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(date_insertion_str))
+        except (ValueError, TypeError):
+            continue
+        if dt.timestamp() < seuil_24h:
+            continue
+
+        total += 1
+        sev = (d.get("severity") or "faible").lower()
+        par_severite[sev] = par_severite.get(sev, 0) + 1
+        src = d.get("source_api") or "Inconnue"
+        par_source[src] = par_source.get(src, 0) + 1
+
+    lignes_severite = "\n".join(f"  - {sev.capitalize()} : {count}" for sev, count in par_severite.items())
+    if par_source:
+        lignes_source = "\n".join(
+            f"  - {src} : {count}"
+            for src, count in sorted(par_source.items(), key=lambda x: -x[1])
+        )
+    else:
+        lignes_source = "  (aucune détection sur cette période)"
+
+    corps = (
+        f"AEGIS MONITOR — Résumé quotidien\n"
+        f"Période : dernières 24 heures (généré le {maintenant.strftime('%Y-%m-%d à %H:%M')})\n\n"
+        f"Total alertes : {total}\n\n"
+        f"Par sévérité :\n{lignes_severite}\n\n"
+        f"Par source :\n{lignes_source}\n\n"
+        f"— Généré automatiquement par le pipeline AEGIS MONITOR."
+    )
+    return corps, total
+
+
+def envoyer_digest_quotidien(destinataires_str):
+    if not destinataires_str or not destinataires_str.strip():
+        return False
+    destinataires = [d.strip() for d in destinataires_str.split(",") if d.strip()]
+    if not destinataires:
+        return False
+
+    corps, total = construire_corps_digest()
+    sujet = f"[AEGIS MONITOR] Résumé quotidien — {total} alerte(s) sur 24h"
+    return _envoyer_email_smtp(destinataires, sujet, corps)
+
+
+def verifier_et_envoyer_digest(reglages):
+    """Envoie le digest une seule fois par jour, à l'heure définie par DIGEST_HOUR."""
+    if not reglages.get("notif_digest_enabled"):
+        return
+    destinataires = reglages.get("notif_email_recipients", "")
+    if not destinataires:
+        print("ℹ️ Digest quotidien activé mais aucun destinataire configuré "
+              "(Settings > Team Management > Email Recipients).\n")
+        return
+
+    maintenant = datetime.now()
+    if maintenant.hour != DIGEST_HOUR:
+        return  # on n'est pas dans l'heure prévue pour le digest
+
+    aujourdhui = maintenant.strftime("%Y-%m-%d")
+    if _lire_dernier_digest_envoye() == aujourdhui:
+        return  # déjà envoyé aujourd'hui, on ne le renvoie pas à chaque cycle de la même heure
+
+    print(f"=== Envoi du digest quotidien ({DIGEST_HOUR}h) ===")
+    if envoyer_digest_quotidien(destinataires):
+        _marquer_digest_envoye(aujourdhui)
+
+
+# ============================================
 # 4. FONCTION PRINCIPALE
 # ============================================
 
@@ -478,7 +670,8 @@ def executer_recherche():
           f"Tunisia Watch: {reglages['monitoring_tunisia_watch']} | "
           f"APT Watch: {reglages['monitoring_apt_watch']} | "
           f"deepdarkCTI: {reglages['monitoring_deepdarkcti']} | "
-          f"Seuil: {reglages['monitoring_alert_threshold']}\n")
+          f"Seuil: {reglages['monitoring_alert_threshold']} | "
+          f"Email destinataires: {reglages.get('notif_email_recipients') or '(aucun)'}\n")
 
     toutes_les_alertes = []
     victimes_globales = []
@@ -604,6 +797,19 @@ def executer_recherche():
         for alerte in alertes_reellement_inserees:
             if alerte.get('severity') in ['critique', 'eleve']:
                 envoyer_alerte_syslog(alerte)
+
+    # Envoi Email pour les alertes critiques/élevées, vers les destinataires
+    # configurés dans Settings > Team Management > Email Recipients.
+    destinataires_email = reglages.get("notif_email_recipients", "")
+    alertes_critiques_elevees = [a for a in alertes_reellement_inserees if a.get('severity') in ['critique', 'eleve']]
+    if alertes_critiques_elevees and destinataires_email:
+        envoyer_email_alertes(alertes_critiques_elevees, destinataires_email)
+    elif alertes_critiques_elevees and not destinataires_email:
+        print("ℹ️ Alertes critiques/élevées détectées mais aucun destinataire configuré "
+              "(Settings > Team Management > Email Recipients).\n")
+
+    # Résumé quotidien (digest), envoyé une seule fois par jour à DIGEST_HOUR
+    verifier_et_envoyer_digest(reglages)
 
 
 # ============================================

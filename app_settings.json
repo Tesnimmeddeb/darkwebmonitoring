@@ -2,7 +2,7 @@
   "general_platform_name": "AEGIS MONITOR",
   "general_timezone": "UTC",
   "general_language": "fr",
-  "general_logo_filename": "screen.png",
+  "general_logo_filename": "Screenshot_20260104-134918_Messenger.png",
   "security_mfa": true,
   "security_session_timeout": "30",
   "security_ip_whitelist": "",
@@ -18,23 +18,19 @@
   "monitoring_apt_watch": true,
   "monitoring_deepdarkcti": true,
   "monitoring_wazuh_export": true,
-  "monitoring_alert_threshold": "eleve",
+  "monitoring_alert_threshold": "faible",
   "notif_email_enabled": true,
   "notif_slack_enabled": false,
   "notif_pagerduty_enabled": false,
   "notif_email_recipients": "tesmeddeb@gmail.com",
-  "notif_digest_enabled": false,
+  "notif_digest_enabled": true,
   "team_members": [
     {
-      "email": "soc_lead@company.com",
-      "role": "Admin"
-    },
-    {
-      "email": "analyst_1@company.com",
+      "email": "tesmeddeb@gmail.com",
       "role": "Analyst"
     },
     {
-      "email": "tesmeddeb@gmail.com",
+      "email": "hibameddeb@gmail.com",
       "role": "Analyst"
     }
   ],
