@@ -16,6 +16,65 @@ from storage import lire_toutes_les_alertes
 # ============================================================
 ASSETS_FILE = "monitored_assets.json"
 SETTINGS_FILE = "app_settings.json"
+NOTES_FILE = "alert_notes.json"
+HIDDEN_ASSETS_FILE = "hidden_assets.json"
+
+def charger_assets_masques() -> list:
+    """Identifiants d'assets à ne plus afficher dans le tableau Assets,
+    même s'ils apparaissent encore dans l'historique des alertes (assets
+    non-monitorés, donc pas dans monitored_assets.json, mais qu'on veut
+    quand même pouvoir retirer de la vue)."""
+    if os.path.exists(HIDDEN_ASSETS_FILE):
+        try:
+            with open(HIDDEN_ASSETS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def masquer_asset(identifier: str) -> None:
+    masques = charger_assets_masques()
+    if identifier.lower() not in [m.lower() for m in masques]:
+        masques.append(identifier)
+        with open(HIDDEN_ASSETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(masques, f, indent=2, ensure_ascii=False)
+
+def demasquer_asset(identifier: str) -> None:
+    masques = charger_assets_masques()
+    nouveaux = [m for m in masques if m.lower() != identifier.lower()]
+    if len(nouveaux) != len(masques):
+        with open(HIDDEN_ASSETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(nouveaux, f, indent=2, ensure_ascii=False)
+
+
+def charger_toutes_les_notes() -> dict:
+    """Charge toutes les notes, indexées par id d'alerte (en str)."""
+    if os.path.exists(NOTES_FILE):
+        try:
+            with open(NOTES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def sauvegarder_toutes_les_notes(notes: dict) -> None:
+    with open(NOTES_FILE, "w", encoding="utf-8") as f:
+        json.dump(notes, f, indent=2, ensure_ascii=False)
+
+def charger_notes_alerte(aid) -> list:
+    toutes = charger_toutes_les_notes()
+    return toutes.get(str(aid), [])
+
+def ajouter_note_alerte(aid, texte: str) -> None:
+    toutes = charger_toutes_les_notes()
+    key = str(aid)
+    if key not in toutes:
+        toutes[key] = []
+    toutes[key].append({
+        "text": texte.strip(),
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+    sauvegarder_toutes_les_notes(toutes)
 
 def charger_assets() -> list:
     """Charge la liste des assets surveillés depuis le fichier JSON"""
@@ -32,7 +91,7 @@ def sauvegarder_assets(assets: list) -> None:
     with open(ASSETS_FILE, "w", encoding="utf-8") as f:
         json.dump(assets, f, indent=2, ensure_ascii=False)
 
-def ajouter_asset(asset: str, asset_type: str) -> bool:
+def ajouter_asset(asset: str, asset_type: str, category: str = "faible") -> bool:
     """Ajoute un nouvel asset à la liste de surveillance"""
     assets = charger_assets()
     for a in assets:
@@ -41,6 +100,7 @@ def ajouter_asset(asset: str, asset_type: str) -> bool:
     assets.append({
         "identifier": asset,
         "type": asset_type,
+        "category": category,
         "date_ajout": datetime.now().isoformat()
     })
     sauvegarder_assets(assets)
@@ -59,7 +119,7 @@ def supprimer_asset(asset: str) -> bool:
 # FONCTIONS DE SYNCHRONISATION AVEC APP_SETTINGS.JSON
 # ============================================================
 
-def ajouter_asset_avec_sync(asset: str, asset_type: str) -> bool:
+def ajouter_asset_avec_sync(asset: str, asset_type: str, category: str = "faible") -> bool:
     """Ajoute un asset et synchronise avec app_settings.json"""
     assets = charger_assets()
     for a in assets:
@@ -69,6 +129,7 @@ def ajouter_asset_avec_sync(asset: str, asset_type: str) -> bool:
     assets.append({
         "identifier": asset,
         "type": asset_type,
+        "category": category,
         "date_ajout": datetime.now().isoformat()
     })
     sauvegarder_assets(assets)
@@ -103,7 +164,7 @@ def ajouter_asset_avec_sync(asset: str, asset_type: str) -> bool:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️ Erreur mise à jour app_settings.json: {e}")
+        print(f"Erreur mise à jour app_settings.json: {e}")
     
     return True
 
@@ -133,7 +194,7 @@ def supprimer_asset_avec_sync(asset: str) -> bool:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️ Erreur mise à jour app_settings.json: {e}")
+        print(f" Erreur mise à jour app_settings.json: {e}")
     
     return True
 
@@ -191,6 +252,63 @@ if "app_settings" not in st.session_state:
     st.session_state.app_settings = load_settings()
 
 _PLATFORM_NAME = st.session_state.app_settings.get("general_platform_name") or "AEGIS MONITOR"
+
+# ============================================================
+# LANCEMENT AUTOMATIQUE DU PIPELINE main.py EN ARRIÈRE-PLAN
+# ============================================================
+# Plus besoin d'ouvrir un second terminal et taper "python main.py" à part :
+# dès que "streamlit run dashboard.py" démarre, un thread daemon lance le
+# pipeline de collecte en arrière-plan, avec la même logique de boucle que
+# main.py (relit l'intervalle de scan à chaque cycle depuis Settings).
+#
+# @st.cache_resource garantit que ce thread n'est démarré qu'UNE SEULE FOIS
+# pour tout le process Streamlit, peu importe le nombre de reruns causés par
+# les clics/interactions dans l'interface, ou le nombre d'onglets ouverts.
+@st.cache_resource
+def _demarrer_pipeline_arriere_plan():
+    import threading
+    import time as _time
+
+    def _boucle_pipeline():
+        try:
+            import main
+        except Exception as e:
+            print(f"⚠️ Impossible de charger main.py pour le pipeline auto : {e}")
+            return
+
+        # Crée le fichier d'assets par défaut s'il n'existe pas encore
+        # (même logique que le bloc __main__ de main.py).
+        if not os.path.exists(main.ASSETS_FILE):
+            assets_par_defaut = [
+                {"identifier": "yueki", "type": "Mot-clé", "date_ajout": datetime.now().isoformat()},
+                {"identifier": "entreprise-test", "type": "Mot-clé", "date_ajout": datetime.now().isoformat()},
+                {"identifier": "monoprix.tn", "type": "Domaine", "date_ajout": datetime.now().isoformat()},
+                {"identifier": "manvirdi2000@gmail.com", "type": "Email", "date_ajout": datetime.now().isoformat()},
+            ]
+            with open(main.ASSETS_FILE, "w", encoding="utf-8") as f:
+                json.dump(assets_par_defaut, f, indent=2, ensure_ascii=False)
+            print(f"Fichier {main.ASSETS_FILE} créé avec les assets par défaut (pipeline auto).")
+
+        print("🚀 Pipeline CTI démarré automatiquement en arrière-plan (depuis dashboard.py).")
+        while True:
+            try:
+                main.executer_recherche()
+            except Exception as e:
+                print(f"⚠️ Erreur pendant un cycle du pipeline auto : {e}")
+
+            try:
+                reglages = main.charger_reglages()
+                intervalle_minutes = int(reglages.get("monitoring_scan_interval", "2"))
+            except (TypeError, ValueError):
+                intervalle_minutes = 2
+            print(f"⏳ Pipeline auto : prochaine exécution dans {intervalle_minutes} minute(s)...")
+            _time.sleep(intervalle_minutes * 60)
+
+    thread = threading.Thread(target=_boucle_pipeline, daemon=True, name="aegis-pipeline-auto")
+    thread.start()
+    return thread
+
+_demarrer_pipeline_arriere_plan()
 
 # ============================================================
 # CONFIG PAGE
@@ -380,8 +498,10 @@ st.markdown(f"""
     
    
     
-    /* Buttons anywhere OUTSIDE the sidebar */
-    div[data-testid="stButton"] > button {{
+    /* Buttons anywhere OUTSIDE the sidebar (stButton ET stDownloadButton) */
+    div[data-testid="stButton"] > button,
+    div[data-testid="stDownloadButton"] > button,
+    div[data-testid="stFormSubmitButton"] > button {{
         background-color: {C['surface_high']} !important;
         color: {C['on_surface']} !important;
         border: 1px solid {C['outline_variant']} !important;
@@ -390,15 +510,74 @@ st.markdown(f"""
         font-size: 12.5px !important;
         transition: all 0.15s ease !important;
     }}
-    div[data-testid="stButton"] > button:hover {{
+    div[data-testid="stButton"] > button:hover,
+    div[data-testid="stDownloadButton"] > button:hover,
+    div[data-testid="stFormSubmitButton"] > button:hover {{
         background-color: {C['surface_highest']} !important;
         border-color: {C['accent']} !important;
         color: {C['accent']} !important;
     }}
-    div[data-testid="stButton"] > button[kind="primary"] {{
+    div[data-testid="stButton"] > button[kind="primary"],
+    div[data-testid="stDownloadButton"] > button[kind="primary"] {{
         background-color: rgba(56,189,248,0.14) !important;
         color: {C['accent']} !important;
         border-color: {C['accent']} !important;
+    }}
+    div[data-testid="stButton"] > button:disabled,
+    div[data-testid="stDownloadButton"] > button:disabled {{
+        background-color: {C['surface_container']} !important;
+        color: {C['outline']} !important;
+        border-color: {C['outline_variant']} !important;
+        opacity: 0.6 !important;
+    }}
+
+    /* ===== Widgets natifs (text_input, selectbox, textarea, number_input,
+       file_uploader, radio, checkbox) : forcer le thème sombre, quel que
+       soit le thème clair/sombre préféré par le navigateur/OS de la
+       personne qui ouvre le dashboard. ===== */
+    div[data-baseweb="input"],
+    div[data-baseweb="textarea"],
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] {{
+        background-color: {C['surface_high']} !important;
+        border-color: {C['outline_variant']} !important;
+    }}
+    div[data-baseweb="input"] input,
+    div[data-baseweb="textarea"] textarea,
+    div[data-baseweb="select"] input,
+    .stTextInput input,
+    .stNumberInput input,
+    .stTextArea textarea {{
+        background-color: transparent !important;
+        color: {C['on_surface']} !important;
+        -webkit-text-fill-color: {C['on_surface']} !important;
+    }}
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] div {{
+        color: {C['on_surface']} !important;
+    }}
+    div[data-baseweb="popover"] ul,
+    div[data-baseweb="menu"] {{
+        background-color: {C['surface_high']} !important;
+    }}
+    div[data-baseweb="popover"] li,
+    div[data-baseweb="menu"] li {{
+        color: {C['on_surface']} !important;
+        background-color: {C['surface_high']} !important;
+    }}
+    div[data-baseweb="popover"] li:hover,
+    div[data-baseweb="menu"] li:hover {{
+        background-color: {C['surface_highest']} !important;
+    }}
+    section[data-testid="stFileUploaderDropzone"],
+    div[data-testid="stFileUploaderDropzone"] {{
+        background-color: {C['surface_high']} !important;
+        border-color: {C['outline_variant']} !important;
+        color: {C['on_surface_variant']} !important;
+    }}
+    ::placeholder {{
+        color: {C['outline']} !important;
+        opacity: 1 !important;
     }}
     .aegis-header {{
         display: flex; justify-content: space-between; align-items: center;
@@ -565,6 +744,107 @@ st.markdown(f"""
         overflow-y: auto;
         box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     }}
+
+    /* ============================================================
+       FIX : certains widgets natifs (text_input, selectbox,
+       download_button, menus déroulants BaseWeb...) gardent le thème
+       clair par défaut de Streamlit tant qu'aucun thème sombre n'est
+       configuré. On force ici leur apparence pour qu'ils matchent le
+       reste du dashboard, quel que soit le navigateur/OS.
+       ============================================================ */
+
+    /* Champs texte (st.text_input, st.text_area) */
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stDateInput"] input {{
+        background-color: {C['surface_high']} !important;
+        color: {C['on_surface']} !important;
+        border: 1px solid {C['outline_variant']} !important;
+        border-radius: 8px !important;
+    }}
+    div[data-testid="stTextInput"] input::placeholder,
+    div[data-testid="stTextArea"] textarea::placeholder {{
+        color: {C['outline']} !important;
+        opacity: 1 !important;
+    }}
+
+    /* Selectbox / Multiselect (BaseWeb) - champ fermé */
+    div[data-baseweb="select"] > div {{
+        background-color: {C['surface_high']} !important;
+        color: {C['on_surface']} !important;
+        border-color: {C['outline_variant']} !important;
+        border-radius: 8px !important;
+    }}
+    div[data-baseweb="select"] span {{
+        color: {C['on_surface']} !important;
+    }}
+    div[data-baseweb="select"] svg {{
+        fill: {C['on_surface_variant']} !important;
+    }}
+
+    /* Menus déroulants (options de selectbox/multiselect) : rendus dans
+       un portail BaseWeb attaché au <body>, donc stylés globalement ici. */
+    ul[data-baseweb="menu"],
+    div[data-baseweb="popover"] div[role="listbox"] {{
+        background-color: {C['surface_high']} !important;
+        border: 1px solid {C['outline_variant']} !important;
+    }}
+    ul[data-baseweb="menu"] li,
+    div[data-baseweb="popover"] div[role="option"] {{
+        background-color: {C['surface_high']} !important;
+        color: {C['on_surface']} !important;
+    }}
+    ul[data-baseweb="menu"] li:hover,
+    div[data-baseweb="popover"] div[role="option"]:hover {{
+        background-color: {C['surface_highest']} !important;
+    }}
+
+    /* Download button (st.download_button) : n'utilise pas
+       data-testid="stButton", donc pas couvert par la règle générale. */
+    div[data-testid="stDownloadButton"] > button {{
+        background-color: {C['surface_high']} !important;
+        color: {C['on_surface']} !important;
+        border: 1px solid {C['outline_variant']} !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        font-size: 12.5px !important;
+    }}
+    div[data-testid="stDownloadButton"] > button:hover {{
+        background-color: {C['surface_highest']} !important;
+        border-color: {C['accent']} !important;
+        color: {C['accent']} !important;
+    }}
+    div[data-testid="stDownloadButton"] > button:disabled {{
+        background-color: {C['surface_container']} !important;
+        color: {C['outline']} !important;
+        border-color: {C['outline_variant']} !important;
+        opacity: 0.6 !important;
+    }}
+
+    /* Libellés des widgets (au-dessus des champs) */
+    div[data-testid="stWidgetLabel"] label,
+    div[data-testid="stWidgetLabel"] p {{
+        color: {C['on_surface_variant']} !important;
+    }}
+
+    /* Checkbox / Radio */
+    div[data-testid="stCheckbox"] label span,
+    div[data-testid="stRadio"] label span {{
+        color: {C['on_surface']} !important;
+    }}
+
+    /* st.popover trigger button (ex: bouton corbeille sur Assets) */
+    div[data-testid="stPopover"] > div > button {{
+        background-color: {C['surface_high']} !important;
+        color: {C['on_surface']} !important;
+        border: 1px solid {C['outline_variant']} !important;
+    }}
+    /* Contenu du popover ouvert (portail body) */
+    div[data-testid="stPopoverBody"] {{
+        background-color: {C['surface_low']} !important;
+        border: 1px solid {C['outline_variant']} !important;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -625,6 +905,32 @@ def classify_asset_type(valeur: str) -> str:
     if _re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", v):
         return "Domaine"
     return "Mot-clé"
+
+def nom_victime_lisible(valeur: str) -> str:
+    """Rend un nom de victime plus lisible quand la source publie une URL à
+    rallonge (chemin avec IDs techniques) au lieu d'un simple nom/domaine.
+    N'affecte QUE l'affichage — la valeur brute en base n'est jamais modifiée."""
+    if not valeur:
+        return valeur
+    v = str(valeur).strip()
+    v_sans_schema = _re.sub(r"^https?://", "", v)
+    segments = [s for s in v_sans_schema.split("/") if s]
+
+    if len(segments) <= 1:
+        return valeur  # déjà un simple domaine/nom : on ne touche à rien
+
+    def _est_id_technique(s: str) -> bool:
+        return bool(_re.fullmatch(r"[0-9]+|[0-9A-Fa-f]{8,}", s))
+
+    candidat = segments[-1]
+    if _est_id_technique(candidat) and len(segments) >= 2:
+        candidat = segments[-2]
+
+    nom = candidat.replace("-", " ").replace("_", " ").strip()
+    if not nom or _est_id_technique(nom.replace(" ", "")):
+        return valeur  # rien d'exploitable trouvé, on garde la valeur d'origine
+
+    return nom.title()
 
 ASSET_TYPE_ICON = {"Domaine": "language", "Adresse IP": "dns", "Email": "mail", "Mot-clé": "sell"}
 
@@ -892,11 +1198,23 @@ if "settings_tab" not in st.session_state:
 
 with st.sidebar:
     _platform_name = st.session_state.app_settings.get("general_platform_name") or "AEGIS MONITOR"
-    st.markdown(f"""
+    _logo_filename = st.session_state.app_settings.get("general_logo_filename")
+    _logo_path = os.path.join(UPLOADS_DIR, _logo_filename) if _logo_filename else None
 
+    if _logo_path and os.path.exists(_logo_path):
+        import base64
+        with open(_logo_path, "rb") as f:
+            _logo_b64 = base64.b64encode(f.read()).decode()
+        _ext = _logo_filename.rsplit(".", 1)[-1].lower()
+        _mime = "image/svg+xml" if _ext == "svg" else "image/png"
+        _logo_icon_html = f'<img src="data:{_mime};base64,{_logo_b64}" style="width:34px;height:34px;border-radius:6px;object-fit:cover;" />'
+    else:
+        _logo_icon_html = '<span class="material-symbols-outlined" style="font-variation-settings:\'FILL\' 1;">shield</span>'
+
+    st.markdown(f"""
     <div class="aegis-logo">
         <div class="aegis-logo-icon">
-            <span class="material-symbols-outlined" style="font-variation-settings:'FILL' 1;">shield</span>
+            {_logo_icon_html}
         </div>
         <div class="aegis-logo-text">
             <h1>{html.escape(_platform_name)}</h1>
@@ -1212,6 +1530,20 @@ def page_assets():
     df = charger_donnees()
     assets_surveilles = charger_assets()
 
+    # Étiquettes techniques utilisées par main.py pour des flux de contexte
+    # général (pas de vrais assets choisis par l'utilisateur) : elles ne
+    # doivent jamais apparaître dans ce tableau. On nettoie aussi
+    # monitored_assets.json si l'une d'elles s'y est retrouvée par erreur.
+    ASSETS_TECHNIQUES_EXCLUS = {"GLOBAL_FEED", "DEEPDARKCTI_STATUS"}
+
+    def _est_asset_technique(identifiant: str) -> bool:
+        ident = (identifiant or "").upper()
+        return ident in ASSETS_TECHNIQUES_EXCLUS or ident.startswith("WATCH_")
+
+    if any(_est_asset_technique(a["identifier"]) for a in assets_surveilles):
+        assets_surveilles = [a for a in assets_surveilles if not _est_asset_technique(a["identifier"])]
+        sauvegarder_assets(assets_surveilles)
+
     # Si l'utilisateur est en train de taper dans la barre de recherche,
     # on force la fermeture du popup "Ajouter un asset" (il ne doit pas
     # réapparaître tout seul pendant une recherche).
@@ -1324,7 +1656,14 @@ def page_assets():
                     st.session_state.asset_success = ""
                 
                 col1, col2 = st.columns(2)
-                
+
+                _value_examples = {
+                    "Domaine": "ex: entreprise.tn, google.com",
+                    "Adresse IP": "ex: 192.168.1.1, 10.0.0.1",
+                    "Email": "ex: contact@entreprise.tn",
+                    "Mot-clé": "ex: ransomware, phishing",
+                }
+
                 with col1:
                     st.markdown('<span class="form-label-custom">Type d\'asset *</span>', unsafe_allow_html=True)
                     new_asset_type = st.selectbox(
@@ -1336,7 +1675,7 @@ def page_assets():
                     st.markdown('<span class="form-label-custom">Valeur de l\'asset *</span>', unsafe_allow_html=True)
                     new_asset_value = st.text_input(
                         "Valeur",
-                        placeholder="ex: entreprise.tn, 192.168.1.1",
+                        placeholder=_value_examples.get(new_asset_type, "ex: entreprise.tn"),
                         key="new_asset_value_dialog"
                     )
                 
@@ -1349,24 +1688,16 @@ def page_assets():
                         index=3,
                         key="new_asset_category_dialog"
                     )
-                    
-                    examples = {
-                        "Domaine": "💡 ex: entreprise.tn, google.com",
-                        "Adresse IP": "💡 ex: 192.168.1.1, 10.0.0.1",
-                        "Email": "💡 ex: contact@entreprise.tn",
-                        "Mot-clé": "💡 ex: ransomware, phishing"
-                    }
-                    st.markdown(f'<div class="form-hint-custom">{examples.get(new_asset_type, "")}</div>', unsafe_allow_html=True)
                 
                 if st.session_state.asset_error:
-                    st.markdown(f'<div class="form-error-custom">⚠️ {st.session_state.asset_error}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="form-error-custom"> {st.session_state.asset_error}</div>', unsafe_allow_html=True)
                 if st.session_state.asset_success:
-                    st.markdown(f'<div class="form-success-custom">✅ {st.session_state.asset_success}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="form-success-custom"> {st.session_state.asset_success}</div>', unsafe_allow_html=True)
                 
                 current_assets_count = len(assets_surveilles)
                 st.markdown(f"""
                 <div style="display:flex; justify-content:flex-end; margin: 8px 0;">
-                    <span class="asset-count-custom">📌 {current_assets_count} asset(s) déjà surveillé(s)</span>
+                    <span class="asset-count-custom"> {current_assets_count} asset(s) déjà surveillé(s)</span>
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -1378,7 +1709,7 @@ def page_assets():
                         st.session_state.asset_success = ""
                         st.session_state.show_add_asset_dialog = False
                         st.rerun()
-                
+
                 with col_actions2:
                     if st.button("Ajouter l'asset", key="save_asset_dialog", use_container_width=True):
                         st.session_state.asset_error = ""
@@ -1434,9 +1765,14 @@ def page_assets():
                                     a["identifier"].lower() == value.lower() 
                                     for a in assets_surveilles
                                 )
+                                # L'asset peut aussi déjà apparaître dans le tableau simplement parce
+                                # qu'il a été détecté dans l'historique des alertes (statut "Inactive"),
+                                # sans jamais avoir été ajouté manuellement — on vérifie aussi ce cas.
+                                if not exists and not df.empty and "asset_recherche" in df.columns:
+                                    exists = value.lower() in df["asset_recherche"].dropna().str.lower().values
                                 
                                 if exists:
-                                    st.session_state.asset_error = f"L'asset '{value}' existe déjà."
+                                    st.session_state.asset_error = f"Cet asset est déjà créé : « {value} »."
                                     st.rerun()
                                 else:
                                     type_map = {
@@ -1446,8 +1782,17 @@ def page_assets():
                                         "Mot-clé": "Mot-clé"
                                     }
                                     mapped_type = type_map.get(new_asset_type, "Mot-clé")
+
+                                    category_map = {
+                                        "Critique": "critique",
+                                        "Élevée": "eleve",
+                                        "Moyenne": "moyenne",
+                                        "Faible": "faible"
+                                    }
+                                    mapped_category = category_map.get(new_asset_category, "faible")
                                     
-                                    if ajouter_asset_avec_sync(value, mapped_type):
+                                    if ajouter_asset_avec_sync(value, mapped_type, mapped_category):
+                                        demasquer_asset(value)  # au cas où il avait été retiré du tableau avant
                                         st.session_state.asset_success = f"Asset '{value}' ajouté avec succès !"
                                         time.sleep(0.5)
                                         st.session_state.show_add_asset_dialog = False
@@ -1465,9 +1810,21 @@ def page_assets():
         return
 
     agg_rows = []
-    
+
+    # Ces valeurs sont des étiquettes techniques utilisées par main.py pour les
+    # flux de contexte général (pas de vrais assets surveillés par l'utilisateur) :
+    #   - GLOBAL_FEED         : toutes les victimes ransomware mondiales
+    #   - WATCH_<PAYS>        : victimes ransomware d'un pays (ex: WATCH_TN)
+    #   - DEEPDARKCTI_STATUS  : statistique globale des sites de fuite actifs
+    # Elles sont déjà affichées en détail sur la page Ransomware Intelligence,
+    # donc on les exclut ici pour ne pas fausser les statistiques du tableau
+    # "Monitored Assets" avec des données qui ne sont pas de vrais assets.
+    # (fonction _est_asset_technique définie en haut de page_assets())
+
     if not df.empty:
         for asset, groupe in df.groupby("asset_recherche"):
+            if _est_asset_technique(asset):
+                continue
             pire_sev = max(
                 groupe["severity"].dropna(), 
                 key=lambda s: SEVERITY_RANK.get(s, 0), 
@@ -1485,17 +1842,25 @@ def page_assets():
             })
     
     for asset_surveille in assets_surveilles:
+        if _est_asset_technique(asset_surveille["identifier"]):
+            continue
         if not any(row["asset"] == asset_surveille["identifier"] for row in agg_rows):
             agg_rows.append({
                 "asset": asset_surveille["identifier"],
                 "type": asset_surveille.get("type", classify_asset_type(asset_surveille["identifier"])),
                 "findings": 0,
-                "severity": "faible",
+                "severity": asset_surveille.get("category", "faible"),
                 "derniere": None,
                 "description": asset_surveille.get("description", ""),
                 "is_monitored": True
             })
     
+    # Retire les assets explicitement masqués par l'utilisateur (ex: assets
+    # "inactifs" issus de l'historique des alertes, supprimés depuis la table
+    # même s'ils ne sont pas dans monitored_assets.json).
+    assets_masques = {m.lower() for m in charger_assets_masques()}
+    agg_rows = [row for row in agg_rows if row["asset"].lower() not in assets_masques]
+
     if not agg_rows:
         st.info("No assets to display. Use the button above to add assets to monitor.")
         return
@@ -1589,36 +1954,54 @@ def page_assets():
             
             row_cols[5].markdown(badge_pill(meta['label'].upper(), meta['color'], meta['bg']), unsafe_allow_html=True)
             
-            if is_monitored:
-                delete_key = f"delete_asset_{r['asset']}_{idx}"
-                with row_cols[6]:
-                    with st.popover("🗑️", use_container_width=True):
+            delete_key = f"delete_asset_{r['asset']}_{idx}"
+            popover_version_key = f"popover_version_{delete_key}"
+            if popover_version_key not in st.session_state:
+                st.session_state[popover_version_key] = 0
+            popover_version = st.session_state[popover_version_key]
+
+            with row_cols[6]:
+                with st.popover("🗑️", use_container_width=True, key=f"popover_{delete_key}_v{popover_version}"):
+                    if is_monitored:
                         st.markdown(f"""
                         <div style="text-align:center; padding: 4px 0;">
                             <p style="font-size: 14px; font-weight: 600; margin-bottom: 4px; color:{C['on_surface']};">
                                 Supprimer <span style="color: {C['accent']};">{html.escape(str(r['asset']))}</span> ?
                             </p>
                             <p style="font-size: 12px; color: {C['outline']}; margin-bottom: 12px;">
-                                ⚠️ Action irréversible
+                                Action irréversible
                             </p>
                         </div>
                         """, unsafe_allow_html=True)
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.button("Annuler", key=f"cancel_{delete_key}", use_container_width=True)
-                        
-                        with col2:
-                            if st.button("Supprimer", key=f"confirm_{delete_key}", use_container_width=True, type="primary"):
-                                if supprimer_asset_avec_sync(r['asset']):
-                                    st.success(f"✅ Asset '{r['asset']}' supprimé !")
-                                    time.sleep(0.5)
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Erreur lors de la suppression.")
-            else:
-                row_cols[6].markdown("—")
+                    else:
+                        st.markdown(f"""
+                        <div style="text-align:center; padding: 4px 0;">
+                            <p style="font-size: 14px; font-weight: 600; margin-bottom: 4px; color:{C['on_surface']};">
+                                Retirer <span style="color: {C['accent']};">{html.escape(str(r['asset']))}</span> du tableau ?
+                            </p>
+                            <p style="font-size: 12px; color: {C['outline']}; margin-bottom: 12px;">
+                                Cet asset n'est pas surveillé activement (statut Inactive) — il vient de
+                                l'historique des alertes. Il sera masqué de cette liste sans effacer les
+                                alertes déjà enregistrées.
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        if st.button("Annuler", key=f"cancel_{delete_key}_v{popover_version}", use_container_width=True):
+                            st.session_state[popover_version_key] = popover_version + 1
+                            st.rerun()
+
+                    with col2:
+                        if st.button("Supprimer", key=f"confirm_{delete_key}_v{popover_version}", use_container_width=True, type="primary"):
+                            if is_monitored:
+                                supprimer_asset_avec_sync(r['asset'])
+                            masquer_asset(r['asset'])
+                            st.success(f" '{r['asset']}' retiré du tableau !")
+                            time.sleep(0.5)
+                            st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.write("")
@@ -1720,7 +2103,7 @@ def page_alerts():
     # ===== EXPORT =====
     st.write("")
     export_df = filtre.drop(columns=["date_detection_dt"], errors="ignore")
-    st.download_button("⬇ Export CSV", data=export_df.to_csv(index=False),
+    st.download_button(" Export CSV", data=export_df.to_csv(index=False),
                         file_name="alertes_export.csv", mime="text/csv")
 
     # ===== TABLEAU DES ALERTES =====
@@ -1761,8 +2144,8 @@ def page_alerts():
             row_cols[1].markdown(badge_pill(meta["label"].upper(), meta["color"], meta["bg"]), unsafe_allow_html=True)
             row_cols[2].markdown(f"<span style='font-size:12.5px; color:{C['on_surface']};'>{html.escape(t_meta['label'])}</span>",
                                   unsafe_allow_html=True)
-            row_cols[3].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>"
-                                  f"{html.escape(str(r['asset_concerne'] or '—'))}</span>", unsafe_allow_html=True)
+            row_cols[3].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};' title=\"{html.escape(str(r['asset_concerne'] or ''))}\">"
+                                  f"{html.escape(nom_victime_lisible(str(r['asset_concerne'] or '')) or '—')}</span>", unsafe_allow_html=True)
             row_cols[4].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>{html.escape(str(r['source_api'] or ''))}</span>",
                                   unsafe_allow_html=True)
             row_cols[5].markdown(f"<span style='font-family:monospace; font-size:11.5px; color:{C['outline']};'>{html.escape(date_str)}</span>",
@@ -1774,8 +2157,6 @@ def page_alerts():
     st.markdown('</div>', unsafe_allow_html=True)
     st.write("")
     controles_pagination("alerts_page", page, total_pages, "alerts")
-
-# [The rest of the functions remain the same - page_alert_detail, page_ransomware_intel, page_search, page_settings, etc.]
 
 def page_alert_detail(alert_id):
     df = charger_donnees()
@@ -1895,7 +2276,7 @@ def page_alert_detail(alert_id):
             </div>
             <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
                 <span style="color:#9aa4bd;">Asset</span>
-                <span style="font-family:monospace; color:#eef1f8;">{html.escape(asset)}</span>
+                <span style="font-family:monospace; color:#eef1f8; text-align:right; word-break:break-all;" title="{html.escape(asset)}">{html.escape(nom_victime_lisible(asset))}</span>
             </div>
             <div style="display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid #1c2436; font-size:14px;">
                 <span style="color:#9aa4bd;">Type</span>
@@ -2108,7 +2489,7 @@ def page_alert_detail(alert_id):
         with col_export:
             csv_data = ligne.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇ Exporter (CSV)",
+                " Exporter (CSV)",
                 data=csv_data,
                 file_name=f"alerte_{aid:04d}.csv",
                 mime="text/csv",
@@ -2138,8 +2519,8 @@ def page_alert_detail(alert_id):
         st.progress(done_count / len(CHECKLIST_ITEMS))
         st.caption(f"{done_count}/{len(CHECKLIST_ITEMS)} actions complétées")
 
-        if st.button("💾 Enregistrer", key=f"save_checklist_{aid}"):
-            st.toast("Actions enregistrées", icon="✅")
+        if st.button(" Enregistrer", key=f"save_checklist_{aid}"):
+            st.toast("Actions enregistrées")
 
     # ============================================================
     # === NOTES (corrigé) ===
@@ -2148,46 +2529,65 @@ def page_alert_detail(alert_id):
     if notes_list_key not in st.session_state:
         st.session_state[notes_list_key] = []
 
+    note_input_key = f"new_note_input_{aid}"
+
+    def _add_note(aid=aid, note_input_key=note_input_key):
+        text = st.session_state.get(note_input_key, "")
+        if text.strip():
+            ajouter_note_alerte(aid, text)
+            st.session_state[note_input_key] = ""  # vide le textarea après ajout
+        else:
+            st.session_state[f"note_error_{aid}"] = True
+
     st.markdown(f"""
-    <div style="background:#0f1524; border:1px solid #1c2436; border-radius:10px; padding:20px 24px; margin-bottom:24px;">
+    <style>
+    .st-key-notes_panel_{aid} {{
+        background:#0f1524;
+        border:1px solid #1c2436;
+        border-radius:10px;
+        padding:20px 24px;
+        margin-bottom:24px;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+    with st.container(key=f"notes_panel_{aid}"):
+        st.markdown("""
         <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:#9aa4bd; margin:0 0 12px 0; font-weight:700;">
             Notes
         </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    if not st.session_state[notes_list_key]:
-        st.markdown('<div style="font-size:13px; color:#5c6480; font-style:italic; padding:4px 0 12px 0;">Aucune note pour le moment.</div>', unsafe_allow_html=True)
-    else:
-        for note in st.session_state[notes_list_key]:
-            st.markdown(f"""
-            <div style="padding:10px 0; border-bottom:1px solid #1c2436;">
-                <div style="font-family:monospace; font-size:11px; color:#5c6480; margin-bottom:3px;">{note['time']}</div>
-                <div style="font-size:13px; color:#9aa4bd; line-height:1.5;">{html.escape(note['text'])}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        notes_alerte = charger_notes_alerte(aid)
 
-    # CORRECTION : label non vide
-    new_note = st.text_area(
-        "Nouvelle note",
-        key=f"new_note_input_{aid}",
-        placeholder="Ajouter une note d'investigation...",
-        height=60,
-        label_visibility="collapsed",
-    )
+        if not notes_alerte:
+            st.markdown('<div style="font-size:13px; color:#5c6480; font-style:italic; padding:4px 0 12px 0;">Aucune note pour le moment.</div>', unsafe_allow_html=True)
+        else:
+            for note in notes_alerte:
+                st.markdown(f"""
+                <div style="padding:10px 0; border-bottom:1px solid #1c2436;">
+                    <div style="font-family:monospace; font-size:11px; color:#5c6480; margin-bottom:3px;">{note['time']}</div>
+                    <div style="font-size:13px; color:#9aa4bd; line-height:1.5;">{html.escape(note['text'])}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-    col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
-    with col_btn1:
-        if st.button("Ajouter la note", key=f"add_note_{aid}"):
-            if new_note.strip():
-                st.session_state[notes_list_key].append({
-                    "text": new_note.strip(),
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                })
-                st.rerun()
-            else:
-                st.toast("Écris une note avant d'enregistrer.", icon="⚠️")
+        st.markdown('<div style="font-size:13px; color:#9aa4bd; margin:14px 0 6px 0;">Vous pouvez ajouter vos notes</div>', unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.text_area(
+            "Nouvelle note",
+            key=note_input_key,
+            placeholder="Ajouter une note d'investigation...",
+            height=60,
+            label_visibility="collapsed",
+        )
+
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
+        with col_btn1:
+            st.button("Ajouter la note", key=f"add_note_{aid}", on_click=_add_note)
+
+        if st.session_state.get(f"note_error_{aid}"):
+            st.toast("Écris une note avant d'enregistrer.")
+            st.session_state[f"note_error_{aid}"] = False
 # ============================================================
 # PAGE : RANSOMWARE INTELLIGENCE (TRI PAR DATE)
 # ============================================================
@@ -2283,7 +2683,6 @@ def page_ransomware_intel():
             st.download_button("EXPORT", data=source_export.drop(columns=["date_insertion_dt"]).to_csv(index=False),
                                 file_name="ransomware_feed.csv", mime="text/csv", key="rw_export")
 
-        # ===== TRI PAR DATE DE PREMIÈRE DÉTECTION (même logique que la page Alerts) =====
         def _to_naive_datetime(col):
             dt = pd.to_datetime(col, errors="coerce", utc=True)
             if hasattr(dt, 'dt') and dt.dt.tz is not None:
@@ -2295,8 +2694,6 @@ def page_ransomware_intel():
             feed["date_detection_dt_tri"] = _to_naive_datetime(feed["date_detection"])
         else:
             feed["date_detection_dt_tri"] = pd.NaT
-        # Comme pour les Alerts : tri décroissant par date de première détection,
-        # les alertes sans cette date sont reléguées en fin de liste.
         feed = feed.sort_values("date_detection_dt_tri", ascending=False, na_position="last")
 
         page_df, page, total_pages, debut, fin, total = paginer(feed, "ransomware_feed_page", taille_page=10)
@@ -2316,6 +2713,7 @@ def page_ransomware_intel():
                 drapeau = country_to_flag(r["country"]) if r["country"] else "🏳️"
                 groupe = extraire_groupe_ransomware(r["details"])
                 victime = str(r["asset_concerne"] or "—")
+                victime_affichee = nom_victime_lisible(victime) if victime != "—" else victime
                 is_tn = r["type"] == "ransomware_leak_tn"
                 row_style = f"background:{hex_to_rgba('#f59e0b', 0.08)};" if is_tn else ""
                 nom_style = f"color:#ef4444; font-weight:700;" if is_tn else f"color:{C['on_surface']};"
@@ -2324,10 +2722,10 @@ def page_ransomware_intel():
                     cible = victime if victime.startswith("http") else f"https://{victime}"
                     lien = (f"<a href='{html.escape(cible)}' target='_blank' style='color:{C['accent']};'>"
                             f"<span class='material-symbols-outlined' style='font-size:15px; vertical-align:middle;'>open_in_new</span></a>")
-                rows += f"""<tr style="{row_style}">
+                rows += f"""<tr style="{row_style}" title="{html.escape(victime)}">
                     <td style="color:{C['outline']}">{html.escape(date_str)}</td>
                     <td style="{nom_style}">{html.escape(groupe)}</td>
-                    <td style="{nom_style}">{html.escape(victime)}</td>
+                    <td style="{nom_style}">{html.escape(victime_affichee)}</td>
                     <td style="text-align:center; font-size:15px;">{drapeau}</td>
                     <td style="text-align:right;">{lien}</td>
                 </tr>"""
@@ -2346,9 +2744,6 @@ def page_ransomware_intel():
         controles_pagination("ransomware_feed_page", page, total_pages, "ransomware_feed")
 
     with col_tn:
-        # ============================================================
-        # COLONNE DE DROITE - FOCUS TUNISIE
-        # ============================================================
         st.markdown(f"""
         <div class="glass-card" style="border:1px solid rgba(245,158,11,0.3);">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
@@ -2361,7 +2756,6 @@ def page_ransomware_intel():
         if df_tn.empty:
             st.caption("Aucune cible tunisienne connue pour le moment.")
         else:
-            # ===== RÉPARTITION PAR SECTEUR =====
             st.markdown(f"<p class='stat-label' style='border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:4px;'>RÉPARTITION PAR SECTEUR</p>",
                          unsafe_allow_html=True)
             rep_secteur = df_tn["sector"].fillna("Non renseigné").value_counts().head(5)
@@ -2383,7 +2777,6 @@ def page_ransomware_intel():
             else:
                 st.caption("Aucune donnée sectorielle disponible.")
 
-            # ===== GROUPES LES PLUS ACTIFS =====
             st.markdown(f"<p class='stat-label' style='border-bottom:1px solid {C['outline_variant']}; padding-bottom:6px; margin-top:16px;'>GROUPES LES PLUS ACTIFS</p>",
                          unsafe_allow_html=True)
             rep_groupes = df_tn["groupe"].value_counts().head(5)
@@ -2407,9 +2800,6 @@ def page_ransomware_intel():
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ============================================================
-    # GRAPHIQUE TENDANCE ET GROUPES LES PLUS ACTIFS
-    # ============================================================
     st.write("")
     col_trend, col_top = st.columns(2)
 
@@ -2479,7 +2869,6 @@ def page_ransomware_intel():
 def page_search():
     df = charger_donnees()
 
-    # Importer les fonctions de main.py pour interroger les APIs
     try:
         from main import (
             verifier_domaine_hudsonrock,
@@ -2502,9 +2891,6 @@ def page_search():
     </div>
     """, unsafe_allow_html=True)
 
-    # ============================================================
-    # FILTRES (4 colonnes - incluant la recherche)
-    # ============================================================
     f1, f2, f3, f4 = st.columns(4)
 
     with f1:
@@ -2531,16 +2917,13 @@ def page_search():
     with f4:
         requete = st.text_input(
             "Recherche",
-            placeholder= "Rechercher un asset...",
+            placeholder="Rechercher un asset...",
             key="search_query",
             label_visibility="hidden",
         )
 
     st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 16px 0;'>", unsafe_allow_html=True)
 
-    # ============================================================
-    # RECHERCHE DANS LA BASE (assets déjà connus / historisés)
-    # ============================================================
     resultats_base = pd.DataFrame()
     resultats_api = []
     api_errors = []
@@ -2548,25 +2931,21 @@ def page_search():
     if not df.empty:
         df_filtered = df.copy()
 
-        # --- Filtrer par type de recherche ---
-        if mode == "🌐 Recherche par Domaine":
+        if mode == "Recherche par Domaine":
             df["_type_recherche"] = df["asset_recherche"].apply(classify_asset_type)
             df_filtered = df[df["_type_recherche"].isin(["Domaine", "Mot-clé", "Adresse IP"])].copy()
-        elif mode == "📧 Recherche par Email":
+        elif mode == "Recherche par Email":
             df["_type_recherche"] = df["asset_recherche"].apply(classify_asset_type)
             df_filtered = df[df["_type_recherche"] == "Email"].copy()
 
         if not df_filtered.empty:
-            # --- Filtrer par sévérité ---
             if selected_severity is not None:
                 df_filtered = df_filtered[df_filtered["severity"] == selected_severity]
 
-            # --- Filtrer par période ---
             if periode != "Tout":
                 heures = {"Dernières 24h": 24, "7 derniers jours": 24 * 7, "30 derniers jours": 24 * 30}[periode]
                 df_filtered = df_filtered[df_filtered["date_insertion_dt"] >= datetime.now() - timedelta(hours=heures)]
 
-            # --- Recherche textuelle ---
             if requete:
                 requete_clean = requete.strip()
                 colonnes_recherchees = ["id", "type", "asset_recherche", "asset_concerne", "source_api", "details", "country", "sector"]
@@ -2582,23 +2961,13 @@ def page_search():
         resultats_base = resultats_base.copy()
         resultats_base["_origine"] = "base"
 
-    # ============================================================
-    # INTERROGATION LIVE DES APIs SUR L'ASSET TAPÉ
-    # ------------------------------------------------------------
-    # IMPORTANT : contrairement à avant, on interroge TOUJOURS les APIs
-    # dès qu'un texte est saisi — pas uniquement quand la base est vide.
-    # L'objectif : pouvoir chercher n'importe quel asset (ex: delice.tn)
-    # même s'il n'a jamais été déclaré/collecté au préalable dans la base.
-    # ============================================================
     if requete and API_AVAILABLE:
         with st.spinner(f"🔍 Interrogation des APIs pour '{requete}'..."):
             asset_search = requete.strip()
             resultats_api = []
 
-            # Déterminer le type d'asset
             asset_type = classify_asset_type(asset_search)
 
-            # --- 1. Ransomware.live ---
             try:
                 victimes = recuperer_victimes_ransomware()
                 for victime in victimes:
@@ -2610,8 +2979,7 @@ def page_search():
             except Exception as e:
                 api_errors.append(f"Ransomware.live: {str(e)[:50]}...")
 
-            # --- 2. Hudson Rock (domaines) ---
-            if asset_type == "Domaine" and mode != "📧 Recherche par Email":
+            if asset_type == "Domaine" and mode != "Recherche par Email":
                 try:
                     resultat_hr = verifier_domaine_hudsonrock(asset_search)
                     if resultat_hr:
@@ -2620,8 +2988,7 @@ def page_search():
                 except Exception as e:
                     api_errors.append(f"Hudson Rock: {str(e)[:50]}...")
 
-            # --- 3. Hudson Rock (emails) ---
-            if asset_type == "Email" and mode != "🌐 Recherche par Domaine":
+            if asset_type == "Email" and mode != "Recherche par Domaine":
                 try:
                     resultat_hr_email = verifier_email_hudsonrock(asset_search)
                     if resultat_hr_email:
@@ -2630,7 +2997,6 @@ def page_search():
                 except Exception as e:
                     api_errors.append(f"Hudson Rock email: {str(e)[:50]}...")
 
-            # --- 4. Check-The-Sum (silencieux) ---
             try:
                 urls = recuperer_domaines_checkthesum()
                 if urls:
@@ -2641,7 +3007,6 @@ def page_search():
             except Exception:
                 pass
 
-            # --- 5. RansomLook ---
             try:
                 from main import rechercher_ransomlook
                 resultats_ransomlook = rechercher_ransomlook([asset_search])
@@ -2650,9 +3015,6 @@ def page_search():
             except Exception:
                 pass
 
-    # ============================================================
-    # AFFICHAGE DES RÉSULTATS
-    # ============================================================
     def snippet(details: str, terme: str, largeur: int = 60) -> str:
         details = details or ""
         if not terme:
@@ -2670,7 +3032,6 @@ def page_search():
         suffixe = "…" if fin < len(details) else ""
         return f"{prefixe}{avant}<span style='background:#1e293b; padding:1px 4px; border-radius:3px; font-weight:600; color:{C['accent']};'>{match}</span>{apres}{suffixe}"
 
-    # --- Combiner les résultats (base + APIs live, dédupliqués) ---
     df_api = pd.DataFrame()
     if resultats_api:
         df_api = pd.DataFrame(resultats_api)
@@ -2680,8 +3041,6 @@ def page_search():
         if "date_insertion" not in df_api.columns:
             df_api["date_insertion"] = datetime.now().isoformat()
 
-        # Dédoublonnage léger : si un résultat live correspond déjà à une ligne
-        # de la base (même asset_concerne + même source), on ne le montre pas deux fois.
         if not resultats_base.empty and "asset_concerne" in df_api.columns:
             deja_connus = set(
                 zip(
@@ -2695,13 +3054,11 @@ def page_search():
             )
             df_api = df_api[masque_nouveaux]
 
-        # Génère un id unique pour les résultats live (évite les collisions de key Streamlit)
         if "id" not in df_api.columns or df_api["id"].isna().any():
             df_api["id"] = [f"live_{i}" for i in range(len(df_api))]
 
     resultats_combined = pd.concat([resultats_base, df_api], ignore_index=True) if (not resultats_base.empty or not df_api.empty) else pd.DataFrame()
 
-    # ===== TRI PAR DATE DE PREMIÈRE DÉTECTION (même logique que la page Alerts) =====
     if not resultats_combined.empty:
         def to_naive_datetime(col):
             dt = pd.to_datetime(col, errors="coerce", utc=True)
@@ -2714,12 +3071,8 @@ def page_search():
         else:
             resultats_combined["date_detection_dt"] = pd.NaT
 
-        # Les résultats live (API) n'ont généralement pas de date_detection propre :
-        # ils sont relégués après les alertes en base qui en ont une, exactement
-        # comme sur la page Alerts (na_position="last").
         resultats_combined = resultats_combined.sort_values("date_detection_dt", ascending=False, na_position="last")
 
-    # --- Afficher les résultats ---
     if resultats_combined.empty:
         if requete:
             st.info(f"🔍 Aucun résultat trouvé pour '{requete}' dans la base et les APIs.")
@@ -2741,7 +3094,7 @@ def page_search():
         <span style="font-size:15px; font-weight:600; color:#f8fafc;">Search Results
             <span style="font-size:12px; font-weight:400; color:#94a3b8;">
                 ({len(resultats_combined)} résultat{'s' if len(resultats_combined) != 1 else ''}
-                {f' · 📊 {nb_base} en base' if nb_base else ''}{f' · 🌐 {nb_live} en direct (API)' if nb_live else ''})
+                {f' ·  {nb_base} en base' if nb_base else ''}{f' ·  {nb_live} en direct (API)' if nb_live else ''})
             </span>
         </span>
     </div>
@@ -2789,9 +3142,6 @@ def page_search():
             st.session_state.page = "alerts"
             st.rerun()
 
-        # --- Panneau "Plus de détails" : uniquement pour les résultats LIVE ---
-        # Les résultats déjà en base ont déjà la flèche "→" qui ouvre la fiche complète,
-        # donc pas besoin d'un expander redondant pour eux.
         if origine == "live":
             details_full = str(r.get("details", "") or "Aucun détail disponible.")
             asset_concerne_val = str(r.get("asset_concerne", "") or "Non spécifié")
@@ -2844,7 +3194,183 @@ def page_search():
     st.markdown('</div>', unsafe_allow_html=True)
     st.write("")
     controles_pagination("search_page", page, total_pages, "search")
+# ============================================================
+# PAGE : WAZUH SIEM (alertes remontées depuis le Wazuh Indexer)
+# ============================================================
+@st.cache_data(ttl=30)
+def _charger_alertes_wazuh(limite=200):
+    """Appelle main.recuperer_alertes_wazuh() et retourne (DataFrame, erreur)."""
+    try:
+        from main import recuperer_alertes_wazuh
+    except ImportError as e:
+        return pd.DataFrame(), f"Impossible d'importer main.py ({e})."
 
+    resultats, erreur = recuperer_alertes_wazuh(limite=limite)
+    if erreur:
+        return pd.DataFrame(), erreur
+
+    df = pd.DataFrame(resultats)
+    if not df.empty:
+        df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df.sort_values("timestamp_dt", ascending=False)
+    return df, None
+
+
+def _wazuh_severity_from_level(level):
+    """Convertit un niveau de règle Wazuh (0-15) en une sévérité cohérente
+    avec le reste du dashboard, pour les alertes qui n'ont pas de champ
+    'severity' propre (ex: événements système captés en même temps)."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return "faible"
+    if level >= 12:
+        return "critique"
+    if level >= 7:
+        return "eleve"
+    if level >= 4:
+        return "moyenne"
+    return "faible"
+
+
+def page_wazuh_siem():
+    st.markdown("""
+    <div class="aegis-header">
+        <div style="display:flex; align-items:center;">
+            <h2>Wazuh SIEM</h2>
+            <span class="live-pill"><span class="live-dot"></span> Intégration CTI → SIEM</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <p style="color:{C['on_surface_variant']}; font-size:13.5px; margin:-8px 0 20px 0;">
+        Alertes du groupe de règles <code>aegis_cti</code> remontées par le pipeline vers l'agent
+        Wazuh installé sur la machine surveillée, puis corrélées par le Wazuh Manager.
+    </p>
+    """, unsafe_allow_html=True)
+
+    col_refresh, _ = st.columns([1, 5])
+    with col_refresh:
+        if st.button("Rafraîchir", key="wazuh_refresh", use_container_width=True):
+            _charger_alertes_wazuh.clear()
+            st.rerun()
+
+    df_wazuh, erreur = _charger_alertes_wazuh()
+
+    if erreur:
+        st.markdown(f"""
+        <div class="glass-card" style="border-color:{C['warning']}55;">
+            <div style="display:flex; align-items:flex-start; gap:10px;">
+                <span class="material-symbols-outlined" style="color:{C['warning']}; font-size:20px;">warning</span>
+                <div>
+                    <div style="font-weight:700; color:{C['on_surface']}; margin-bottom:6px;">
+                        Connexion au Wazuh Indexer indisponible
+                    </div>
+                    <div style="color:{C['on_surface_variant']}; font-size:13px; line-height:1.6;">
+                        {html.escape(erreur)}
+                    </div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div class="glass-card" style="margin-top:16px;">
+            <div class="card-title">Configuration requise (.env)</div>
+            <div style="color:{C['on_surface_variant']}; font-size:13px; line-height:1.8;">
+                Ajoute ces variables dans le fichier <code>.env</code> à la racine du projet, puis clique sur
+                "Rafraîchir" ci-dessus :
+                <pre style="background:{C['surface_high']}; padding:12px; border-radius:8px; margin-top:8px; font-size:12px; overflow-x:auto;">WAZUH_INDEXER_URL=https://192.168.48.134:9200
+WAZUH_INDEXER_USER=admin
+WAZUH_INDEXER_PASSWORD=ton_mot_de_passe_indexer</pre>
+                Ce sont les identifiants du <b>Wazuh Indexer</b> (OpenSearch), généralement affichés à la fin
+                de l'installation de Wazuh (<code>wazuh-install.sh</code>), pas ceux du dashboard web Wazuh.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    if df_wazuh.empty:
+        st.info("Aucune alerte 'aegis_cti' trouvée côté Wazuh pour le moment. "
+                 "Vérifie que main.py a bien exporté des alertes récentes et que l'agent Wazuh est actif.")
+        return
+
+    df_wazuh["severity_calc"] = df_wazuh.apply(
+        lambda r: (r.get("severity") or "").lower() if r.get("severity") else _wazuh_severity_from_level(r.get("rule_level")),
+        axis=1,
+    )
+
+    total = len(df_wazuh)
+    critiques = int((df_wazuh["severity_calc"] == "critique").sum())
+    elevees = int((df_wazuh["severity_calc"] == "eleve").sum())
+    faibles = int((df_wazuh["severity_calc"].isin(["faible", "moyenne"])).sum())
+    derniere = df_wazuh["timestamp_dt"].max() if df_wazuh["timestamp_dt"].notna().any() else None
+
+    stats = [
+        {"label": "Alertes reçues", "value": str(total), "color": C["accent"], "sub": "Groupe aegis_cti"},
+        {"label": "Critiques", "value": str(critiques), "color": "#ef4444", "sub": "Niveau règle ≥ 12"},
+        {"label": "Élevées", "value": str(elevees), "color": "#f59e0b", "sub": "Niveau règle 7-11"},
+        {"label": "Dernière réception", "value": temps_relatif(derniere) if derniere is not None else "—",
+         "color": C["on_surface"], "sub": "Côté Wazuh Manager"},
+    ]
+    cols = st.columns(4)
+    for col, stat in zip(cols, stats):
+        with col:
+            st.markdown(f"""
+            <div class="glass-card" style="text-align:center; border-top: 2px solid {stat['color']}; padding:14px;">
+                <span class="stat-label">{html.escape(stat['label'])}</span>
+                <div class="stat-value" style="font-size:22px; color:{stat['color']};">{html.escape(str(stat['value']))}</div>
+                <div class="stat-sub">{html.escape(stat['sub'])}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.write("")
+    st.markdown('<div class="glass-card" style="padding:0; overflow:hidden;">', unsafe_allow_html=True)
+
+    page_df, page, total_pages, debut, fin, total_rows = paginer(df_wazuh, "wazuh_page", taille_page=15)
+
+    st.markdown(f"""
+    <div class="data-toolbar" style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid {C['outline_variant']};">
+        <span style="font-size:13px; font-weight:700; color:{C['on_surface']};">Alertes Wazuh (aegis_cti)</span>
+        <span class="pagination-info">Affichage {debut}-{fin} sur {total_rows}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    header_cols = st.columns([1.3, 0.9, 1.6, 1.6, 1.1, 0.8, 1.1])
+    for c, h in zip(header_cols, ["Date/Heure", "Sévérité", "Type", "Asset concerné", "Source CTI", "Règle", "Agent"]):
+        c.markdown(f"<span class='stat-label'>{h}</span>", unsafe_allow_html=True)
+    st.markdown(f"<hr style='border-color:{C['outline_variant']}; margin:6px 0 4px 0;'>", unsafe_allow_html=True)
+
+    for _, r in page_df.iterrows():
+        meta = sev_meta(r["severity_calc"])
+        t_meta = type_meta(r.get("type")) if r.get("type") else {"label": "Événement Wazuh"}
+        date_str = r["timestamp_dt"].strftime("%Y-%m-%d %H:%M") if pd.notna(r.get("timestamp_dt")) else "—"
+
+        row_cols = st.columns([1.3, 0.9, 1.6, 1.6, 1.1, 0.8, 1.1])
+        row_cols[0].markdown(f"<span style='font-family:monospace; font-size:11.5px; color:{C['outline']};'>{html.escape(date_str)}</span>", unsafe_allow_html=True)
+        row_cols[1].markdown(badge_pill(meta["label"].upper(), meta["color"], meta["bg"]), unsafe_allow_html=True)
+        row_cols[2].markdown(f"<span style='font-size:12.5px; color:{C['on_surface']};'>{html.escape(t_meta.get('label', '—'))}</span>", unsafe_allow_html=True)
+        row_cols[3].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>{html.escape(str(r.get('asset_concerne') or '—'))}</span>", unsafe_allow_html=True)
+        row_cols[4].markdown(f"<span style='font-size:12.5px; color:{C['on_surface_variant']};'>{html.escape(str(r.get('source_api') or '—'))}</span>", unsafe_allow_html=True)
+        row_cols[5].markdown(f"<span style='font-family:monospace; font-size:11.5px; color:{C['accent']};'>{html.escape(str(r.get('rule_id') or '—'))} (L{html.escape(str(r.get('rule_level') or '—'))})</span>", unsafe_allow_html=True)
+        row_cols[6].markdown(f"<span style='font-size:11.5px; color:{C['on_surface_variant']};'>{html.escape(str(r.get('agent_name') or '—'))}</span>", unsafe_allow_html=True)
+
+        details_val = str(r.get("details") or "")
+        if details_val:
+            with st.expander(f"Détails — {r.get('rule_description') or 'Alerte Wazuh'}", expanded=False):
+                st.markdown(f"""
+                <div style="font-size:13px; color:{C['on_surface_variant']}; line-height:1.6;">
+                    {html.escape(details_val)}
+                </div>
+                <div style="margin-top:10px; font-size:11.5px; color:{C['outline']}; font-family:monospace;">
+                    Wazuh ID: {html.escape(str(r.get('wazuh_id') or '—'))} · Secteur: {html.escape(str(r.get('sector') or '—'))} · Pays: {html.escape(str(r.get('country') or '—'))}
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.write("")
+    controles_pagination("wazuh_page", page, total_pages, "wazuh")
 # ============================================================
 # PAGE : SETTINGS
 # ============================================================
@@ -2965,15 +3491,6 @@ def page_settings():
                                key=_fk("general_platform_name"), label_visibility="collapsed")
             st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
 
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                _settings_field_label("Default Timezone")
-            with c2:
-                tz_options = ["UTC", "EST", "PST"]
-                st.selectbox("Timezone", tz_options,
-                              index=tz_options.index(settings["general_timezone"]) if settings["general_timezone"] in tz_options else 0,
-                              key=_fk("general_timezone"), label_visibility="collapsed")
-            st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
 
             c1, c2 = st.columns([1, 2])
             with c1:
@@ -3094,89 +3611,78 @@ def page_settings():
             _settings_card_close()
 
         elif current_tab == "team":
-            _settings_card_open("group", "Team Management")
+            _settings_card_open("group", "Alert Recipients")
 
-            members = settings.get("team_members", [])
-            for i, member in enumerate(members):
-                mc1, mc2, mc3 = st.columns([5, 2, 1])
-                role_color = C["accent"] if member["role"] == "Admin" else C["on_surface_variant"]
-                role_badge = badge_pill(member["role"].upper(), role_color, hex_to_rgba(role_color, 0.14))
-                mc1.markdown(f"""
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:13px; color:{C['on_surface']};">{html.escape(member['email'])}</span>
-                    {role_badge}
-                </div>
-                """, unsafe_allow_html=True)
-                if mc3.button("✕", key=f"team_remove_{i}"):
-                    new_settings = dict(st.session_state.app_settings)
-                    new_members = list(new_settings.get("team_members", []))
-                    new_members.pop(i)
-                    new_settings["team_members"] = new_members
-                    save_settings(new_settings)
-                    st.session_state.app_settings = new_settings
-                    st.rerun()
+            recipients_str = settings.get("notif_email_recipients", "") or ""
+            recipients = [r.strip() for r in recipients_str.split(",") if r.strip()]
 
-            st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
-            st.markdown('<p class="settings-field-label">Invite Team Member</p>', unsafe_allow_html=True)
-            st.caption("Ajoute la personne à la liste et lui envoie un email pour l'informer "
-                       "qu'elle a été invitée à consulter le dashboard.")
-
-            _invite_version = st.session_state.get("team_invite_version", 0)
-            _email_key = f"team_new_email_v{_invite_version}"
-            _role_key = f"team_new_role_v{_invite_version}"
-
-            ic1, ic2, ic3 = st.columns([3, 1.5, 1])
-            with ic1:
-                new_email = st.text_input("Email", placeholder="new_member@company.com",
-                                           key=_email_key, label_visibility="collapsed")
-            with ic2:
-                new_role = st.selectbox("Rôle", ["Analyst", "Admin"], key=_role_key,
-                                         label_visibility="collapsed")
-            with ic3:
-                if st.button("+ Invite", key="team_invite_btn", width="stretch"):
-                    if new_email and "@" in new_email:
+            if not recipients:
+                st.caption("Aucun destinataire configuré pour le moment.")
+            else:
+                for i, email in enumerate(recipients):
+                    mc1, mc3 = st.columns([6, 1])
+                    mc1.markdown(f"""
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="material-symbols-outlined" style="font-size:16px; color:{C['accent']};">mail</span>
+                        <span style="font-size:13px; color:{C['on_surface']};">{html.escape(email)}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if mc3.button("✕", key=f"recipient_remove_{i}"):
                         new_settings = dict(st.session_state.app_settings)
-                        new_members = list(new_settings.get("team_members", []))
-                        new_members.append({"email": new_email.strip(), "role": new_role})
-                        new_settings["team_members"] = new_members
+                        new_recipients = [e for j, e in enumerate(recipients) if j != i]
+                        new_settings["notif_email_recipients"] = ", ".join(new_recipients)
                         save_settings(new_settings)
                         st.session_state.app_settings = new_settings
-                        # Change de "génération" de clé pour que le champ email
-                        # reparte vide au prochain rerun, sans jamais modifier
-                        # directement la valeur d'un widget déjà instancié.
-                        st.session_state["team_invite_version"] = _invite_version + 1
-
-                        corps = (
-                            f"Bonjour,\n\n"
-                            f"Vous avez été invité(e) à consulter le dashboard {_PLATFORM_NAME} "
-                            f"en tant que {new_role}.\n\n"
-                            f"Adresse du dashboard : {os.getenv('AEGIS_PUBLIC_URL', 'http://localhost:8501')}\n\n"
-                            f"— {_PLATFORM_NAME}"
-                        )
-                        email_envoye = _envoyer_notification_invitation(
-                            [new_email.strip()],
-                            f"[{_PLATFORM_NAME}] Vous êtes invité(e) au dashboard",
-                            corps,
-                        )
-                        if email_envoye:
-                            st.success(f"{new_email} ajouté(e) à l'équipe et email envoyé.")
-                        else:
-                            st.warning(f"{new_email} ajouté(e) à l'équipe, mais l'email n'a pas pu être "
-                                       f"envoyé (vérifie la configuration SMTP dans .env).")
                         st.rerun()
+
+            st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
+            st.markdown('<p class="settings-field-label">Add Email Recipient</p>', unsafe_allow_html=True)
+            st.caption("Les alertes critiques/élevées et le résumé quotidien seront envoyés à ces adresses.")
+
+            _recipient_version = st.session_state.get("recipient_add_version", 0)
+            _recipient_email_key = f"recipient_new_email_v{_recipient_version}"
+
+            ic1, ic3 = st.columns([4, 1])
+            with ic1:
+                new_recipient_email = st.text_input("Email", placeholder="soc@company.com",
+                                                    key=_recipient_email_key, label_visibility="collapsed")
+            with ic3:
+                if st.button("+ Add", key="recipient_add_btn", use_container_width=True):
+                    if new_recipient_email and "@" in new_recipient_email:
+                        email_clean = new_recipient_email.strip()
+                        if email_clean.lower() in [r.lower() for r in recipients]:
+                            st.warning(f"{email_clean} est déjà dans la liste.")
+                        else:
+                            new_settings = dict(st.session_state.app_settings)
+                            new_recipients = recipients + [email_clean]
+                            new_settings["notif_email_recipients"] = ", ".join(new_recipients)
+                            save_settings(new_settings)
+                            st.session_state.app_settings = new_settings
+                            st.session_state["recipient_add_version"] = _recipient_version + 1
+
+                            corps = (
+                                f"Bonjour,\n\n"
+                                f"Cette adresse a été ajoutée à la liste des destinataires des alertes "
+                                f"{_PLATFORM_NAME}.\n"
+                                f"Vous recevrez désormais une notification par email pour chaque nouvelle "
+                                f"alerte critique ou élevée détectée par le pipeline"
+                                f"{' , ainsi que le résumé quotidien.' if new_settings.get('notif_digest_enabled') else '.'}\n\n"
+                                f"— {_PLATFORM_NAME}"
+                            )
+                            email_envoye = _envoyer_notification_invitation(
+                                [email_clean],
+                                f"[{_PLATFORM_NAME}] Vous recevrez désormais les alertes par email",
+                                corps,
+                            )
+                            if email_envoye:
+                                st.success(f"{email_clean} ajouté(e) et notifié(e) par email.")
+                            else:
+                                st.warning(f"{email_clean} ajouté(e) aux destinataires, mais l'email de "
+                                           f"confirmation n'a pas pu être envoyé (vérifie la config SMTP dans .env).")
+                            st.rerun()
                     else:
                         st.error("Adresse email invalide.")
 
-            st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
-
-
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                _settings_field_label("Email Recipients", "Alerts will be sent to these addresses.")
-            with c2:
-                st.text_input("Destinataires", value=settings["notif_email_recipients"],
-                               placeholder="soc@company.com, admin@company.com",
-                               key=_fk("notif_email_recipients"), label_visibility="collapsed")
             st.markdown('<hr class="settings-divider">', unsafe_allow_html=True)
 
             c1, c2 = st.columns([1, 2])
@@ -3184,7 +3690,7 @@ def page_settings():
                 _settings_field_label("Alert Digest", "Send daily summary of all alerts.")
             with c2:
                 st.checkbox("Activer le résumé quotidien", value=settings["notif_digest_enabled"],
-                             key=_fk("notif_digest_enabled"))
+                            key=_fk("notif_digest_enabled"))
 
             _save_cancel_buttons("team")
             _settings_card_close()

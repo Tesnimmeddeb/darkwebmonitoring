@@ -22,7 +22,7 @@
   "notif_email_enabled": true,
   "notif_slack_enabled": false,
   "notif_pagerduty_enabled": false,
-  "notif_email_recipients": "tesmeddeb@gmail.com",
+  "notif_email_recipients": "tesmeddeb@gmail.com, xy10xy20@gmail.com",
   "notif_digest_enabled": true,
   "team_members": [
     {
@@ -46,17 +46,7 @@
       "date_ajout": "2026-08-26T15:40:18"
     },
     {
-      "identifier": "entreprise.tn",
-      "type": "Domaine",
-      "date_ajout": "2026-08-26T15:40:18"
-    },
-    {
       "identifier": "WATCH_TN",
-      "type": "Mot-clé",
-      "date_ajout": "2026-08-26T15:40:18"
-    },
-    {
-      "identifier": "yueki",
       "type": "Mot-clé",
       "date_ajout": "2026-08-26T15:40:18"
     },
@@ -72,7 +62,11 @@
     }
   ],
   "monitored_domains": [
+    "orange.tn",
     "delice.tn",
-    "orange.tn"
+    "topnet.tn"
+  ],
+  "monitored_emails": [
+    "xy10xy20@gmail.com"
   ]
 }
